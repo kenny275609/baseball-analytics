@@ -6,3 +6,6 @@ ADD COLUMN IF NOT EXISTS out_type TEXT CHECK (out_type IN ('flyout', 'groundout'
 
 -- 新增註解
 COMMENT ON COLUMN atbats.out_type IS '出局類型：flyout=接殺, groundout=刺殺, double_play=雙殺, triple_play=三殺';
+
+
+

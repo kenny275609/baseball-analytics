@@ -68,3 +68,6 @@ ORDER BY policyname;
 --   (auth.uid() = p.id) as can_read
 -- FROM profiles p
 -- WHERE p.id = 'YOUR_USER_ID';
+
+
+

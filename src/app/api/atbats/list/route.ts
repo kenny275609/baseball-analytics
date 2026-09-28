@@ -1,10 +1,11 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
-import { requireAuth } from '@/lib/auth';
+import { authorize } from '@/lib/auth';
 
 export async function GET(request: Request) {
   try {
-    await requireAuth();
+    const auth = await authorize();
+    if (auth.error) return auth.error;
     const supabase = await createClient();
 
     const { searchParams } = new URL(request.url);
@@ -12,11 +13,16 @@ export async function GET(request: Request) {
 
     let query = supabase
       .from('atbats')
-      .select('*, players(name, number)')
+      .select('*, players(name, number), games(game_date, opponent)')
       .order('created_at', { ascending: false });
 
     if (playerId) {
       query = query.eq('player_id', playerId);
+    }
+
+    const gameId = searchParams.get('game');
+    if (gameId) {
+      query = query.eq('game_id', gameId);
     }
 
     const { data: atbats, error } = await query;
@@ -34,3 +40,6 @@ export async function GET(request: Request) {
     );
   }
 }
+
+
+

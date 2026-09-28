@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -16,16 +17,13 @@ export function Navbar() {
   const [user, setUser] = useState<SessionUser | null>(null);
   const [loading, setLoading] = useState(true);
   const router = useRouter();
+  const pathname = usePathname();
   const supabase = createClient();
 
+  // 換頁時重新取得使用者資訊（登入後導回首頁時才會立刻顯示）
   useEffect(() => {
     fetchUser();
-    // 定期重新取得使用者資訊（每 30 秒）
-    const interval = setInterval(() => {
-      fetchUser();
-    }, 30000);
-    return () => clearInterval(interval);
-  }, []);
+  }, [pathname]);
 
   const fetchUser = async () => {
     try {
@@ -70,16 +68,29 @@ export function Navbar() {
     );
   }
 
+  const navLink = (href: string, label: string, active: boolean) => (
+    <Link
+      href={href}
+      className={`text-sm font-medium px-2 py-1 rounded-md ${active ? 'bg-gray-100 text-gray-900' : 'text-gray-600'}`}
+    >
+      {label}
+    </Link>
+  );
+
   return (
     <nav className="border-b bg-white">
-      <div className="container mx-auto px-4 py-3">
-        <div className="flex items-center justify-between">
-          <h1 className="text-xl font-bold">⚾ Baseball Keep Web</h1>
-          <div className="flex items-center gap-4">
+      <div className="container mx-auto px-4 py-2">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Link href="/" className="text-lg font-bold mr-1">⚾</Link>
+            {user && navLink('/', '比賽', pathname === '/' || pathname.startsWith('/games'))}
+            {user && navLink('/players', '球員', pathname.startsWith('/players') || pathname.startsWith('/stats'))}
+          </div>
+          <div className="flex items-center gap-2">
             {user && (
               <>
                 <div className="flex items-center gap-2">
-                  <span className="text-sm text-gray-600">{user.email}</span>
+                  <span className="hidden sm:inline text-sm text-gray-600">{user.email}</span>
                   <Badge className={getRoleColor(user.role)}>
                     {user.role === 'admin' ? '管理員' : user.role === 'editor' ? '編輯者' : '檢視者'}
                   </Badge>
@@ -90,7 +101,7 @@ export function Navbar() {
                     size="sm"
                     onClick={() => router.push('/admin/users')}
                   >
-                    使用者管理
+                    使用者
                   </Button>
                 )}
                 <Button variant="outline" size="sm" onClick={handleLogout}>

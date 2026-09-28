@@ -1,47 +1,27 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
-import { requireRole } from '@/lib/auth';
+import { authorize } from '@/lib/auth';
+import { parseAtbatInput } from '@/lib/atbat';
 
 export async function POST(request: Request) {
   try {
-    await requireRole(['editor', 'admin']);
+    const auth = await authorize(['editor', 'admin']);
+    if (auth.error) return auth.error;
     const supabase = await createClient();
 
     const body = await request.json();
-    const {
-      player_id,
-      contacted,
-      no_contact,
-      quality,
-      result,
-      out_type,
-      rbi,
-      hit_x,
-      hit_y,
-      note,
-    } = body;
+    if (!body.player_id || !body.game_id) {
+      return NextResponse.json({ error: '缺少球員或比賽' }, { status: 400 });
+    }
 
-    if (!player_id) {
-      return NextResponse.json(
-        { error: 'Player ID is required' },
-        { status: 400 }
-      );
+    const parsed = parseAtbatInput(body);
+    if (parsed.error) {
+      return NextResponse.json({ error: parsed.error }, { status: 400 });
     }
 
     const { data: atbat, error } = await supabase
       .from('atbats')
-      .insert({
-        player_id,
-        contacted: contacted ?? false,
-        no_contact,
-        quality,
-        result,
-        out_type,
-        rbi: rbi ?? 0,
-        hit_x,
-        hit_y,
-        note,
-      })
+      .insert({ ...parsed.row, player_id: body.player_id, game_id: body.game_id })
       .select()
       .single();
 

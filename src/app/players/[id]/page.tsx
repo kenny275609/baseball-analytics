@@ -1,12 +1,11 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Badge } from '@/components/ui/badge';
 import {
   Dialog,
   DialogContent,
@@ -14,226 +13,149 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { HitPointViewer } from '@/components/HitPointViewer';
+import { BaseballField, FieldPoint } from '@/components/BaseballField';
+import { useSession } from '@/lib/useSession';
+import {
+  AtbatResultFields,
+  computeStats,
+  fieldsToResult,
+  formatRate,
+  getResultOption,
+  qualityLabel,
+} from '@/lib/atbat';
 
-interface Atbat {
+interface Atbat extends AtbatResultFields {
   id: string;
   player_id: string;
-  contacted: boolean;
-  no_contact: string | null;
+  game_id: string | null;
+  inning: number | null;
   quality: string | null;
-  result: string | null;
-  out_type: string | null;
   rbi: number;
   hit_x: number | null;
   hit_y: number | null;
   note: string | null;
   created_at: string;
-  players: {
-    name: string;
-    number: string | null;
-  };
-}
-
-interface SessionUser {
-  id: string;
-  email: string;
-  role: 'admin' | 'editor' | 'viewer';
+  players: { name: string; number: string | null } | null;
+  games: { game_date: string; opponent: string } | null;
 }
 
 export default function PlayerPage() {
   const params = useParams();
-  const router = useRouter();
   const playerId = params.id as string;
+  const { canEdit } = useSession();
   const [atbats, setAtbats] = useState<Atbat[]>([]);
-  const [user, setUser] = useState<SessionUser | null>(null);
+  const [playerName, setPlayerName] = useState('球員');
   const [loading, setLoading] = useState(true);
-  const [selectedHitPoint, setSelectedHitPoint] = useState<{ x: number; y: number } | null>(null);
-  const [showHitPointDialog, setShowHitPointDialog] = useState(false);
+  const [viewPoint, setViewPoint] = useState<FieldPoint | null>(null);
 
   useEffect(() => {
-    fetchUser();
-    fetchAtbats();
+    fetch(`/api/atbats/list?player=${playerId}`)
+      .then((res) => res.json())
+      .then((data) => setAtbats(data.atbats || []))
+      .finally(() => setLoading(false));
+    fetch('/api/players/list')
+      .then((res) => res.json())
+      .then((data) => {
+        const p = data.players?.find((x: { id: string }) => x.id === playerId);
+        if (p) setPlayerName(p.number ? `#${p.number} ${p.name}` : p.name);
+      });
   }, [playerId]);
 
-  const fetchUser = async () => {
-    try {
-      const response = await fetch('/api/auth/getSession');
-      const data = await response.json();
-      setUser(data.user);
-    } catch (error) {
-      console.error('Error fetching user:', error);
-    }
-  };
-
-  const fetchAtbats = async () => {
-    try {
-      const response = await fetch(`/api/atbats/list?player=${playerId}`);
-      const data = await response.json();
-      setAtbats(data.atbats || []);
-    } catch (error) {
-      console.error('Error fetching atbats:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const canEdit = user?.role === 'editor' || user?.role === 'admin';
-
-  const playerName = atbats[0]?.players?.name || '球員';
-
-  const getOutTypeLabel = (outType: string) => {
-    const labels: Record<string, string> = {
-      flyout: '接殺',
-      groundout: '刺殺',
-      double_play: '雙殺',
-      triple_play: '三殺',
-    };
-    return labels[outType] || outType;
-  };
-
-  const getResultLabel = (result: string | null) => {
-    if (!result) return '-';
-    const labels: Record<string, string> = {
-      single: '一壘安打',
-      double: '二壘安打',
-      triple: '三壘安打',
-      homerun: '全壘打',
-      sacrifice: '犧牲打',
-      out: '出局',
-      error: '失誤',
-    };
-    return labels[result] || result;
-  };
+  const stats = computeStats(atbats);
 
   return (
-    <div className="container mx-auto px-4 py-8">
-      <div className="mb-6">
-        <Link href="/">
-          <Button variant="outline" size="sm" className="mb-4">
-            ← 返回
-          </Button>
-        </Link>
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-3xl font-bold">{playerName} 的打擊紀錄</h1>
-            <p className="text-gray-600 mt-1">共 {atbats.length} 筆紀錄</p>
-          </div>
-          <div className="flex gap-2">
-            <Link href={`/stats/${playerId}`}>
-              <Button variant="outline">查看統計</Button>
-            </Link>
-            {canEdit && (
-              <Link href={`/record/${playerId}`}>
-                <Button>新增打擊紀錄</Button>
-              </Link>
-            )}
-          </div>
+    <div className="container mx-auto px-4 py-6 max-w-3xl">
+      <Link href="/players">
+        <Button variant="outline" size="sm" className="mb-4">← 球員名單</Button>
+      </Link>
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h1 className="text-2xl font-bold">{playerName}</h1>
+          <p className="text-gray-600 text-sm mt-1">
+            {stats.pa} 打席 · 打擊率 {formatRate(stats.avg)} · 上壘率 {formatRate(stats.obp)}
+          </p>
         </div>
+        <Link href={`/stats/${playerId}`}>
+          <Button variant="outline">完整統計</Button>
+        </Link>
       </div>
 
       {loading ? (
         <div className="text-center py-12">載入中...</div>
       ) : atbats.length === 0 ? (
         <Card>
-          <CardContent className="py-12 text-center">
-            <p className="text-gray-500">尚無打擊紀錄</p>
-            {canEdit && (
-              <Link href={`/record/${playerId}`}>
-                <Button className="mt-4">新增第一筆紀錄</Button>
-              </Link>
-            )}
+          <CardContent className="py-12 text-center text-gray-500">
+            尚無打席紀錄，打席請從「比賽」頁面記錄
           </CardContent>
         </Card>
       ) : (
-        <Card>
+        <Card className="py-0 overflow-x-auto">
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>日期</TableHead>
-                <TableHead>接觸</TableHead>
-                <TableHead>品質</TableHead>
+                <TableHead>比賽</TableHead>
+                <TableHead>局</TableHead>
                 <TableHead>結果</TableHead>
+                <TableHead>品質</TableHead>
                 <TableHead>打點</TableHead>
                 <TableHead>落點</TableHead>
                 <TableHead>備註</TableHead>
-                {canEdit && <TableHead>操作</TableHead>}
+                {canEdit && <TableHead />}
               </TableRow>
             </TableHeader>
             <TableBody>
-              {atbats.map((atbat) => (
-                <TableRow key={atbat.id}>
-                  <TableCell>
-                    {new Date(atbat.created_at).toLocaleDateString('zh-TW')}
-                  </TableCell>
-                  <TableCell>
-                    {atbat.contacted ? (
-                      <Badge className="bg-green-500">是</Badge>
-                    ) : (
-                      <Badge variant="outline">{atbat.no_contact || '否'}</Badge>
-                    )}
-                  </TableCell>
-                  <TableCell>{atbat.quality || '-'}</TableCell>
-                  <TableCell>
-                    {getResultLabel(atbat.result)}
-                    {atbat.result === 'out' && atbat.out_type && (
-                      <span className="ml-2 text-sm text-gray-500">
-                        ({getOutTypeLabel(atbat.out_type)})
-                      </span>
-                    )}
-                  </TableCell>
-                  <TableCell>{atbat.rbi}</TableCell>
-                  <TableCell>
-                    {atbat.hit_x !== null && atbat.hit_y !== null ? (
-                      <button
-                        onClick={() => {
-                          setSelectedHitPoint({ x: atbat.hit_x!, y: atbat.hit_y! });
-                          setShowHitPointDialog(true);
-                        }}
-                        className="text-sm text-blue-600 hover:text-blue-800 hover:underline cursor-pointer"
-                      >
-                        ({atbat.hit_x.toFixed(1)}, {atbat.hit_y.toFixed(1)})
-                      </button>
-                    ) : (
-                      '-'
-                    )}
-                  </TableCell>
-                  <TableCell className="max-w-xs truncate">
-                    {atbat.note || '-'}
-                  </TableCell>
-                  {canEdit && (
-                    <TableCell>
-                      <Link href={`/record/${playerId}/edit/${atbat.id}`}>
-                        <Button variant="outline" size="sm">
-                          編輯
-                        </Button>
-                      </Link>
+              {atbats.map((a) => {
+                const option = getResultOption(fieldsToResult(a));
+                return (
+                  <TableRow key={a.id}>
+                    <TableCell className="whitespace-nowrap">
+                      {a.games && a.game_id ? (
+                        <Link href={`/games/${a.game_id}`} className="hover:underline">
+                          {a.games.game_date.slice(5)} vs {a.games.opponent}
+                        </Link>
+                      ) : (
+                        new Date(a.created_at).toLocaleDateString('zh-TW')
+                      )}
                     </TableCell>
-                  )}
-                </TableRow>
-              ))}
+                    <TableCell>{a.inning ?? '-'}</TableCell>
+                    <TableCell className="font-medium">{option?.label ?? '-'}</TableCell>
+                    <TableCell>{qualityLabel(a.quality)}</TableCell>
+                    <TableCell>{a.rbi}</TableCell>
+                    <TableCell>
+                      {a.hit_x !== null && a.hit_y !== null ? (
+                        <button
+                          onClick={() => setViewPoint({ x: a.hit_x!, y: a.hit_y!, group: option?.group })}
+                          className="text-sm text-blue-600 hover:underline"
+                        >
+                          查看
+                        </button>
+                      ) : (
+                        '-'
+                      )}
+                    </TableCell>
+                    <TableCell className="max-w-40 truncate">{a.note || '-'}</TableCell>
+                    {canEdit && (
+                      <TableCell>
+                        <Link href={`/record/${playerId}/edit/${a.id}`}>
+                          <Button variant="outline" size="sm">編輯</Button>
+                        </Link>
+                      </TableCell>
+                    )}
+                  </TableRow>
+                );
+              })}
             </TableBody>
           </Table>
         </Card>
       )}
 
-      {/* 落點查看 Dialog */}
-      <Dialog open={showHitPointDialog} onOpenChange={setShowHitPointDialog}>
-        <DialogContent className="max-w-2xl">
+      <Dialog open={viewPoint !== null} onOpenChange={(open) => !open && setViewPoint(null)}>
+        <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>打擊落點位置</DialogTitle>
-            <DialogDescription>
-              查看此筆打擊紀錄的落點在球場上的位置
-            </DialogDescription>
+            <DialogTitle>打擊落點</DialogTitle>
+            <DialogDescription>此打席的落點位置</DialogDescription>
           </DialogHeader>
-          {selectedHitPoint && (
-            <div className="py-4">
-              <HitPointViewer
-                hitX={selectedHitPoint.x}
-                hitY={selectedHitPoint.y}
-              />
-            </div>
-          )}
+          {viewPoint && <BaseballField points={[viewPoint]} />}
         </DialogContent>
       </Dialog>
     </div>

@@ -1,169 +1,90 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from '@/components/ui/dialog';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Card, CardContent } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { useSession } from '@/lib/useSession';
 
-interface Player {
+interface Game {
   id: string;
-  name: string;
-  number: string | null;
-  created_at: string;
+  game_date: string;
+  opponent: string;
+  home_away: 'home' | 'away';
+  status: 'live' | 'final';
+  our_score: number | null;
+  opp_score: number | null;
+  atbats: { count: number }[];
 }
 
-interface SessionUser {
-  id: string;
-  email: string;
-  role: 'admin' | 'editor' | 'viewer';
-}
-
-export default function HomePage() {
-  const [players, setPlayers] = useState<Player[]>([]);
-  const [user, setUser] = useState<SessionUser | null>(null);
+export default function GamesPage() {
+  const { canEdit } = useSession();
+  const [games, setGames] = useState<Game[]>([]);
   const [loading, setLoading] = useState(true);
-  const [open, setOpen] = useState(false);
-  const [name, setName] = useState('');
-  const [number, setNumber] = useState('');
-  const router = useRouter();
+  const [error, setError] = useState('');
 
   useEffect(() => {
-    fetchUser();
-    fetchPlayers();
+    fetch('/api/games/list')
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error);
+        setGames(data.games);
+      })
+      .catch(() => setError('載入比賽失敗。若是第一次使用，請確認已執行 migration 011。'))
+      .finally(() => setLoading(false));
   }, []);
 
-  const fetchUser = async () => {
-    try {
-      const response = await fetch('/api/auth/getSession');
-      const data = await response.json();
-      setUser(data.user);
-    } catch (error) {
-      console.error('Error fetching user:', error);
-    }
-  };
-
-  const fetchPlayers = async () => {
-    try {
-      const response = await fetch('/api/players/list');
-      const data = await response.json();
-      setPlayers(data.players || []);
-    } catch (error) {
-      console.error('Error fetching players:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleCreatePlayer = async (e: React.FormEvent) => {
-    e.preventDefault();
-    try {
-      const response = await fetch('/api/players/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, number }),
-      });
-
-      if (response.ok) {
-        setOpen(false);
-        setName('');
-        setNumber('');
-        fetchPlayers();
-      }
-    } catch (error) {
-      console.error('Error creating player:', error);
-    }
-  };
-
-  const canEdit = user?.role === 'editor' || user?.role === 'admin';
-
   return (
-    <div className="container mx-auto px-4 py-8">
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-3xl font-bold">球員名單</h1>
+    <div className="container mx-auto px-4 py-6 max-w-2xl">
+      <div className="flex items-center justify-between mb-4">
+        <h1 className="text-2xl font-bold">比賽</h1>
         {canEdit && (
-          <Dialog open={open} onOpenChange={setOpen}>
-            <DialogTrigger asChild>
-              <Button>新增球員</Button>
-            </DialogTrigger>
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>新增球員</DialogTitle>
-                <DialogDescription>請填寫球員基本資料</DialogDescription>
-              </DialogHeader>
-              <form onSubmit={handleCreatePlayer} className="space-y-4">
-                <div className="space-y-2">
-                  <Label htmlFor="name">姓名 *</Label>
-                  <Input
-                    id="name"
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    required
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="number">背號</Label>
-                  <Input
-                    id="number"
-                    value={number}
-                    onChange={(e) => setNumber(e.target.value)}
-                  />
-                </div>
-                <Button type="submit" className="w-full">
-                  建立
-                </Button>
-              </form>
-            </DialogContent>
-          </Dialog>
+          <Link href="/games/new">
+            <Button>＋ 新比賽</Button>
+          </Link>
         )}
       </div>
 
       {loading ? (
         <div className="text-center py-12">載入中...</div>
-      ) : players.length === 0 ? (
+      ) : error ? (
+        <Card><CardContent className="py-8 text-center text-red-600">{error}</CardContent></Card>
+      ) : games.length === 0 ? (
         <Card>
-          <CardContent className="py-12 text-center">
-            <p className="text-gray-500">尚無球員資料</p>
+          <CardContent className="py-12 text-center text-gray-500">
+            還沒有比賽紀錄{canEdit && '，按「新比賽」開始記錄'}
           </CardContent>
         </Card>
       ) : (
-        <Card>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>姓名</TableHead>
-                <TableHead>背號</TableHead>
-                <TableHead>操作</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {players.map((player) => (
-                <TableRow key={player.id}>
-                  <TableCell className="font-medium">{player.name}</TableCell>
-                  <TableCell>{player.number || '-'}</TableCell>
-                  <TableCell>
-                    <Link href={`/players/${player.id}`}>
-                      <Button variant="outline" size="sm">
-                        查看紀錄
-                      </Button>
-                    </Link>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </Card>
+        <div className="space-y-2">
+          {games.map((g) => (
+            <Link key={g.id} href={`/games/${g.id}`} className="block">
+              <Card className="py-0 hover:bg-gray-50 transition-colors">
+                <CardContent className="py-4 flex items-center justify-between">
+                  <div>
+                    <div className="text-sm text-gray-500">
+                      {g.game_date} · {g.home_away === 'home' ? '主場' : '客場'}
+                    </div>
+                    <div className="text-lg font-semibold">vs {g.opponent}</div>
+                  </div>
+                  <div className="text-right">
+                    {g.status === 'live' ? (
+                      <Badge className="bg-green-600">進行中</Badge>
+                    ) : g.our_score !== null && g.opp_score !== null ? (
+                      <div className="text-xl font-bold tabular-nums">
+                        {g.our_score} : {g.opp_score}
+                      </div>
+                    ) : (
+                      <Badge variant="outline">已結束</Badge>
+                    )}
+                    <div className="text-xs text-gray-500 mt-1">{g.atbats[0]?.count ?? 0} 個打席</div>
+                  </div>
+                </CardContent>
+              </Card>
+            </Link>
+          ))}
+        </div>
       )}
     </div>
   );

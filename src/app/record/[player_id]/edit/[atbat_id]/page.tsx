@@ -1,37 +1,23 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useParams, useRouter, useSearchParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
+import { AtbatDraft, AtbatEntry, EMPTY_DRAFT } from '@/components/AtbatEntry';
+import { useSession } from '@/lib/useSession';
+import { AtbatResultFields, fieldsToResult } from '@/lib/atbat';
 
-interface SessionUser {
+interface AtbatData extends AtbatResultFields {
   id: string;
-  email: string;
-  role: 'admin' | 'editor' | 'viewer';
-}
-
-interface AtbatData {
-  id: string;
-  player_id: string;
-  contacted: boolean;
-  no_contact: string | null;
   quality: string | null;
-  result: string | null;
-  out_type: string | null;
   rbi: number;
   hit_x: number | null;
   hit_y: number | null;
   note: string | null;
+  inning: number | null;
+  batting_order: number | null;
+  players: { name: string } | null;
 }
 
 export default function EditAtbatPage() {
@@ -39,286 +25,97 @@ export default function EditAtbatPage() {
   const router = useRouter();
   const playerId = params.player_id as string;
   const atbatId = params.atbat_id as string;
-  const [user, setUser] = useState<SessionUser | null>(null);
+  const { user, loading: sessionLoading, canEdit } = useSession();
+  const [atbat, setAtbat] = useState<AtbatData | null>(null);
+  const [draft, setDraft] = useState<AtbatDraft>(EMPTY_DRAFT);
+  const [inning, setInning] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
-  const [contacted, setContacted] = useState(true);
-  const [noContact, setNoContact] = useState('');
-  const [quality, setQuality] = useState('');
-  const [result, setResult] = useState('');
-  const [outType, setOutType] = useState('');
-  const [rbi, setRbi] = useState(0);
-  const [note, setNote] = useState('');
-  const [hitX, setHitX] = useState<number | null>(null);
-  const [hitY, setHitY] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
 
   useEffect(() => {
-    fetchUser();
-    fetchAtbat();
-  }, [atbatId]);
+    if (!sessionLoading && user && !canEdit) router.push('/');
+  }, [sessionLoading, user, canEdit, router]);
 
-  const fetchUser = async () => {
-    try {
-      const response = await fetch('/api/auth/getSession');
-      const data = await response.json();
-      setUser(data.user);
-      if (data.user?.role === 'viewer') {
-        router.push('/');
-      }
-    } catch (error) {
-      console.error('Error fetching user:', error);
-    }
-  };
+  useEffect(() => {
+    fetch(`/api/atbats/list?player=${playerId}`)
+      .then((res) => res.json())
+      .then((data) => {
+        const found: AtbatData | undefined = data.atbats?.find((a: AtbatData) => a.id === atbatId);
+        if (!found) return;
+        setAtbat(found);
+        setInning(found.inning);
+        setDraft({
+          result: fieldsToResult(found),
+          quality: found.quality,
+          rbi: found.rbi ?? 0,
+          hitX: found.hit_x,
+          hitY: found.hit_y,
+          note: found.note ?? '',
+        });
+      })
+      .finally(() => setLoading(false));
+  }, [playerId, atbatId]);
 
-  const fetchAtbat = async () => {
-    try {
-      const response = await fetch(`/api/atbats/list?player=${playerId}`);
-      const data = await response.json();
-      const atbat = data.atbats?.find((a: AtbatData) => a.id === atbatId);
-      
-      if (atbat) {
-        setContacted(atbat.contacted);
-        setNoContact(atbat.no_contact || '');
-        setQuality(atbat.quality || '');
-        setResult(atbat.result || '');
-        setOutType(atbat.out_type || '');
-        setRbi(atbat.rbi || 0);
-        setNote(atbat.note || '');
-        setHitX(atbat.hit_x);
-        setHitY(atbat.hit_y);
-      }
-    } catch (error) {
-      console.error('Error fetching atbat:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = async () => {
+    if (!atbat || !draft.result) return;
     setSubmitting(true);
-
+    setError('');
     try {
-      const response = await fetch('/api/atbats/update', {
+      const res = await fetch('/api/atbats/update', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           id: atbatId,
-          contacted,
-          no_contact: contacted ? null : noContact,
-          quality: contacted ? quality : null,
-          result: contacted ? result : null,
-          out_type: contacted && result === 'out' ? outType : null,
-          rbi,
-          note,
-          // 如果沒有接觸到球，清除落點資訊
-          hit_x: contacted ? hitX : null,
-          hit_y: contacted ? hitY : null,
+          result: draft.result,
+          quality: draft.quality,
+          rbi: draft.rbi,
+          hit_x: draft.hitX,
+          hit_y: draft.hitY,
+          note: draft.note,
+          inning,
+          batting_order: atbat.batting_order,
         }),
       });
-
-      if (response.ok) {
-        router.push(`/players/${playerId}`);
-      }
-    } catch (error) {
-      console.error('Error updating atbat:', error);
-    } finally {
+      if (!res.ok) throw new Error((await res.json()).error);
+      router.back();
+    } catch (err) {
+      setError(err instanceof Error && err.message ? err.message : '儲存失敗');
       setSubmitting(false);
     }
   };
 
-  const handleUpdateHitPoint = () => {
-    // 導向到落點標記頁面
-    router.push(`/record/${playerId}/hitpoint?atbat_id=${atbatId}`);
-  };
-
   if (loading) {
-    return (
-      <div className="container mx-auto px-4 py-8 max-w-2xl">
-        <div className="text-center py-12">載入中...</div>
-      </div>
-    );
+    return <div className="text-center py-12">載入中...</div>;
+  }
+  if (!atbat) {
+    return <div className="text-center py-12 text-gray-500">找不到這筆打席</div>;
   }
 
   return (
-    <div className="container mx-auto px-4 py-8 max-w-2xl">
+    <div className="container mx-auto px-4 py-6 max-w-2xl">
       <Card>
         <CardHeader>
-          <CardTitle>編輯打擊紀錄</CardTitle>
+          <CardTitle>編輯打席：{atbat.players?.name}</CardTitle>
         </CardHeader>
-        <CardContent>
-          <form onSubmit={handleSubmit} className="space-y-6">
-            <div className="space-y-2">
-              <Label>是否接觸到球？</Label>
-              <div className="flex gap-4">
-                <Button
-                  type="button"
-                  variant={contacted ? 'default' : 'outline'}
-                  onClick={() => {
-                    setContacted(true);
-                    // 如果改為「是」，保留現有落點
-                  }}
-                >
-                  是
-                </Button>
-                <Button
-                  type="button"
-                  variant={!contacted ? 'default' : 'outline'}
-                  onClick={() => {
-                    setContacted(false);
-                    // 如果改為「否」，清除落點資訊
-                    setHitX(null);
-                    setHitY(null);
-                    setQuality('');
-                    setResult('');
-                    setOutType('');
-                  }}
-                >
-                  否
-                </Button>
-              </div>
-            </div>
+        <CardContent className="space-y-5">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium">局數</span>
+            <Button type="button" variant="outline" size="icon-sm" onClick={() => setInning(Math.max(1, (inning ?? 1) - 1))}>◀</Button>
+            <span className="w-14 text-center font-bold">{inning ? `${inning} 局` : '—'}</span>
+            <Button type="button" variant="outline" size="icon-sm" onClick={() => setInning(Math.min(30, (inning ?? 0) + 1))}>▶</Button>
+          </div>
 
-            {!contacted ? (
-              <div className="space-y-2">
-                <Label htmlFor="no_contact">未接觸原因</Label>
-                <Select value={noContact} onValueChange={setNoContact}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="選擇原因" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="strikeout">三振</SelectItem>
-                    <SelectItem value="walk">保送</SelectItem>
-                    <SelectItem value="hit_by_pitch">觸身球</SelectItem>
-                    <SelectItem value="other">其他</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            ) : (
-              <>
-                <div className="space-y-2">
-                  <Label htmlFor="quality">擊球品質</Label>
-                  <Select value={quality} onValueChange={setQuality}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="選擇品質" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="hard">強勁</SelectItem>
-                      <SelectItem value="medium">中等</SelectItem>
-                      <SelectItem value="soft">軟弱</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
+          <AtbatEntry draft={draft} onChange={setDraft} />
 
-                <div className="space-y-2">
-                  <Label htmlFor="result">結果</Label>
-                  <Select value={result} onValueChange={setResult}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="選擇結果" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="single">一壘安打</SelectItem>
-                      <SelectItem value="double">二壘安打</SelectItem>
-                      <SelectItem value="triple">三壘安打</SelectItem>
-                      <SelectItem value="homerun">全壘打</SelectItem>
-                      <SelectItem value="sacrifice">犧牲打</SelectItem>
-                      <SelectItem value="out">出局</SelectItem>
-                      <SelectItem value="error">失誤</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
+          {error && <div className="text-sm text-red-600 bg-red-50 p-3 rounded-md">{error}</div>}
 
-                {result === 'out' && (
-                  <div className="space-y-2">
-                    <Label htmlFor="out_type">出局類型</Label>
-                    <Select value={outType} onValueChange={setOutType}>
-                      <SelectTrigger>
-                        <SelectValue placeholder="選擇出局類型" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="flyout">接殺</SelectItem>
-                        <SelectItem value="groundout">刺殺</SelectItem>
-                        <SelectItem value="double_play">雙殺</SelectItem>
-                        <SelectItem value="triple_play">三殺</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                )}
-              </>
-            )}
-
-            <div className="space-y-2">
-              <Label htmlFor="rbi">打點 (RBI)</Label>
-              <Input
-                id="rbi"
-                type="number"
-                min="0"
-                value={rbi}
-                onChange={(e) => setRbi(parseInt(e.target.value) || 0)}
-              />
-            </div>
-
-            {/* 落點資訊 - 只有接觸到球時才顯示 */}
-            {contacted && (
-              <>
-                {hitX !== null && hitY !== null ? (
-                  <div className="space-y-2">
-                    <Label>打擊落點</Label>
-                    <div className="flex items-center gap-4">
-                      <div className="text-sm text-gray-600">
-                        目前落點: ({hitX.toFixed(1)}, {hitY.toFixed(1)})
-                      </div>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={handleUpdateHitPoint}
-                      >
-                        修改落點
-                      </Button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    <Label>打擊落點</Label>
-                    <div className="text-sm text-gray-600 mb-2">
-                      尚未標記落點
-                    </div>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={handleUpdateHitPoint}
-                    >
-                      標記落點
-                    </Button>
-                  </div>
-                )}
-              </>
-            )}
-
-            <div className="space-y-2">
-              <Label htmlFor="note">備註</Label>
-              <Input
-                id="note"
-                value={note}
-                onChange={(e) => setNote(e.target.value)}
-                placeholder="額外說明..."
-              />
-            </div>
-
-            <div className="flex gap-4">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => router.push(`/players/${playerId}`)}
-              >
-                取消
-              </Button>
-              <Button type="submit" disabled={submitting}>
-                {submitting ? '儲存中...' : '儲存變更'}
-              </Button>
-            </div>
-          </form>
+          <div className="flex gap-3">
+            <Button type="button" variant="outline" onClick={() => router.back()}>取消</Button>
+            <Button onClick={handleSubmit} disabled={!draft.result || submitting}>
+              {submitting ? '儲存中...' : '儲存變更'}
+            </Button>
+          </div>
         </CardContent>
       </Card>
     </div>

@@ -2,18 +2,17 @@
 
 import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
+import Link from 'next/link';
+import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { SprayChart } from '@/components/SprayChart';
+import { AtbatResultFields, computeStats, fieldsToResult, formatRate, getResultOption } from '@/lib/atbat';
 
-interface Atbat {
+interface Atbat extends AtbatResultFields {
   id: string;
-  contacted: boolean;
-  quality: string | null;
-  result: string | null;
   rbi: number;
   hit_x: number | null;
   hit_y: number | null;
-  created_at: string;
 }
 
 export default function StatsPage() {
@@ -23,106 +22,74 @@ export default function StatsPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    fetchAtbats();
+    fetch(`/api/atbats/list?player=${playerId}`)
+      .then((res) => res.json())
+      .then((data) => setAtbats(data.atbats || []))
+      .finally(() => setLoading(false));
   }, [playerId]);
 
-  const fetchAtbats = async () => {
-    try {
-      const response = await fetch(`/api/atbats/list?player=${playerId}`);
-      const data = await response.json();
-      setAtbats(data.atbats || []);
-    } catch (error) {
-      console.error('Error fetching atbats:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Calculate statistics
-  const contactedAtbats = atbats.filter((a) => a.contacted);
-  const totalAtbats = contactedAtbats.length;
-  const hits = contactedAtbats.filter(
-    (a) => a.result && ['single', 'double', 'triple', 'homerun'].includes(a.result)
-  ).length;
-  const avg = totalAtbats > 0 ? hits / totalAtbats : 0;
-
-  // Calculate SLG (slugging percentage)
-  const singles = contactedAtbats.filter((a) => a.result === 'single').length;
-  const doubles = contactedAtbats.filter((a) => a.result === 'double').length;
-  const triples = contactedAtbats.filter((a) => a.result === 'triple').length;
-  const homeruns = contactedAtbats.filter((a) => a.result === 'homerun').length;
-  const totalBases = singles + doubles * 2 + triples * 3 + homeruns * 4;
-  const slg = totalAtbats > 0 ? totalBases / totalAtbats : 0;
-
-  // Prepare hit points data for spray chart
-  const hitPoints = contactedAtbats
-    .filter((a) => a.hit_x !== null && a.hit_y !== null)
-    .map((a) => ({
-      x: a.hit_x!,
-      y: a.hit_y!,
-      result: a.result,
-    }));
-
   if (loading) {
-    return (
-      <div className="container mx-auto px-4 py-8">
-        <div className="text-center py-12">載入中...</div>
-      </div>
-    );
+    return <div className="text-center py-12">載入中...</div>;
   }
 
+  const s = computeStats(atbats);
+  const hitPoints = atbats
+    .filter((a) => a.hit_x !== null && a.hit_y !== null)
+    .map((a) => ({ x: a.hit_x!, y: a.hit_y!, group: getResultOption(fieldsToResult(a))?.group }));
+
+  const rates = [
+    { label: '打擊率 AVG', value: s.avg, detail: `${s.h} 安 / ${s.ab} 打數` },
+    { label: '上壘率 OBP', value: s.obp, detail: `${s.h + s.bb + s.hbp} 次上壘` },
+    { label: '長打率 SLG', value: s.slg, detail: `${s.tb} 壘打數` },
+    { label: 'OPS', value: s.ops, detail: 'OBP + SLG' },
+  ];
+  const counts = [
+    ['打席', s.pa], ['打數', s.ab], ['安打', s.h], ['二安', s.b2], ['三安', s.b3],
+    ['全壘打', s.hr], ['打點', s.rbi], ['保送', s.bb], ['觸身', s.hbp], ['三振', s.so], ['犧牲', s.sac],
+  ] as const;
+
   return (
-    <div className="container mx-auto px-4 py-8">
-      <h1 className="text-3xl font-bold mb-6">打擊統計</h1>
+    <div className="container mx-auto px-4 py-6 max-w-3xl space-y-4">
+      <Link href={`/players/${playerId}`}>
+        <Button variant="outline" size="sm">← 返回</Button>
+      </Link>
+      <h1 className="text-2xl font-bold">打擊統計</h1>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-        <Card>
-          <CardHeader>
-            <CardTitle>打擊率 (AVG)</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-4xl font-bold">
-              {avg.toFixed(3)}
-            </div>
-            <p className="text-sm text-gray-600 mt-2">
-              {hits} / {totalAtbats} 打數
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>長打率 (SLG)</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-4xl font-bold">
-              {slg.toFixed(3)}
-            </div>
-            <p className="text-sm text-gray-600 mt-2">
-              {totalBases} 總壘打數 / {totalAtbats} 打數
-            </p>
-          </CardContent>
-        </Card>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        {rates.map((r) => (
+          <Card key={r.label} className="gap-1 py-4">
+            <CardContent>
+              <div className="text-xs text-gray-500">{r.label}</div>
+              <div className="text-3xl font-bold tabular-nums">{formatRate(r.value)}</div>
+              <div className="text-xs text-gray-500 mt-1">{r.detail}</div>
+            </CardContent>
+          </Card>
+        ))}
       </div>
 
-      {hitPoints.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle>打擊落點分布圖 (Spray Chart)</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <SprayChart hitPoints={hitPoints} width={600} height={600} />
-          </CardContent>
-        </Card>
-      )}
+      <Card className="py-4">
+        <CardContent className="grid grid-cols-4 sm:grid-cols-6 gap-y-3 text-center">
+          {counts.map(([label, value]) => (
+            <div key={label}>
+              <div className="text-lg font-bold tabular-nums">{value}</div>
+              <div className="text-xs text-gray-500">{label}</div>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
 
-      {hitPoints.length === 0 && (
-        <Card>
-          <CardContent className="py-12 text-center">
-            <p className="text-gray-500">尚無打擊落點資料</p>
-          </CardContent>
-        </Card>
-      )}
+      <Card>
+        <CardHeader>
+          <CardTitle>打擊落點分布</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {hitPoints.length > 0 ? (
+            <SprayChart hitPoints={hitPoints} />
+          ) : (
+            <p className="text-center text-gray-500 py-8">尚無打擊落點資料</p>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

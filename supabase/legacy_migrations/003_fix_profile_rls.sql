@@ -39,3 +39,6 @@ CREATE POLICY "Admins can update profiles"
 -- 測試查詢：檢查特定使用者的 profile
 -- 在 Supabase SQL Editor 中執行以下查詢來測試（替換 YOUR_USER_ID）：
 -- SELECT id, role, created_at FROM profiles WHERE id = 'YOUR_USER_ID';
+
+
+

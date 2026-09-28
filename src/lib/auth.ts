@@ -1,5 +1,6 @@
 import { createClient } from '@/lib/supabase/server';
 import { redirect } from 'next/navigation';
+import { NextResponse } from 'next/server';
 
 export type UserRole = 'admin' | 'editor' | 'viewer';
 
@@ -93,4 +94,19 @@ export async function requireRole(allowedRoles: UserRole[]): Promise<SessionUser
     redirect('/');
   }
   return session;
+}
+
+// API route 專用：requireRole 的 redirect() 會在 try/catch 裡被吃掉變成 500，
+// API 改用這個，回傳 401/403。
+export async function authorize(
+  allowedRoles: UserRole[] = ['viewer', 'editor', 'admin']
+): Promise<{ session: SessionUser; error?: never } | { session?: never; error: NextResponse }> {
+  const session = await getSession();
+  if (!session) {
+    return { error: NextResponse.json({ error: '請先登入' }, { status: 401 }) };
+  }
+  if (!allowedRoles.includes(session.role)) {
+    return { error: NextResponse.json({ error: '權限不足' }, { status: 403 }) };
+  }
+  return { session };
 }

@@ -27,3 +27,6 @@ $$;
 
 -- 授予執行權限給 authenticated 使用者
 GRANT EXECUTE ON FUNCTION public.get_users_with_profiles() TO authenticated;
+
+
+
