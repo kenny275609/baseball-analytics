@@ -176,3 +176,6 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=your-supabase-anon-key
 3. 執行資料庫 migration
 4. 建立第一個 admin 使用者
 5. 開始使用系統！
+
+
+

@@ -96,3 +96,6 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key-here
 
 - [Vercel 環境變數文件](https://vercel.com/docs/concepts/projects/environment-variables)
 - [Supabase 環境變數文件](https://supabase.com/docs/guides/getting-started/local-development#environment-variables)
+
+
+
