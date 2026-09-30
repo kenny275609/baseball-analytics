@@ -1,12 +1,35 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+
+const LOGIN_TIMEOUT_MS = 20000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
+  ]);
+}
+
+function loginErrorMessage(err: unknown): string {
+  const message = err instanceof Error ? err.message : '';
+  if (message === 'timeout') return '連線逾時，請確認網路後再試一次';
+  if (message === 'Invalid login credentials') return '電子郵件或密碼錯誤';
+  if (message === 'Email not confirmed') return '帳號尚未啟用，請先點擊確認信中的連結';
+  if (message === 'Failed to fetch') return '無法連線到伺服器，請確認網路後再試一次';
+  return message || '登入失敗';
+}
+
+// 用整頁跳轉而不是 router.push：確保新的登入 cookie 一定會送到伺服器，
+// 避免 push + refresh 在部分手機瀏覽器上互相取消而卡在登入頁
+function goHome() {
+  window.location.replace('/');
+}
 
 export default function LoginPage() {
   const [isSignUp, setIsSignUp] = useState(false);
@@ -16,32 +39,38 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
-  const router = useRouter();
   const supabase = createClient();
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+    // Android Chrome 的自動填入可能在 React 接手前就填好欄位，state 會是空的，改從表單本身讀值
+    // （要在 setLoading 之前讀，欄位被 disabled 後 FormData 會略過它們）
+    const form = new FormData(e.currentTarget as HTMLFormElement);
+    const loginEmail = String(form.get('email') ?? email).trim();
+    const loginPassword = String(form.get('password') ?? password);
+
     setLoading(true);
     setError('');
     setSuccess('');
 
     try {
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      });
+      const { data, error } = await withTimeout(
+        supabase.auth.signInWithPassword({ email: loginEmail, password: loginPassword }),
+        LOGIN_TIMEOUT_MS
+      );
 
       if (error) throw error;
 
       if (data.user) {
-        router.push('/');
-        router.refresh();
+        setSuccess('登入成功，正在進入...');
+        goHome();
+        return; // 保持 loading 狀態直到頁面跳轉
       }
-    } catch (err: any) {
-      setError(err.message || '登入失敗');
-    } finally {
-      setLoading(false);
+      setError('登入失敗，請再試一次');
+    } catch (err) {
+      setError(loginErrorMessage(err));
     }
+    setLoading(false);
   };
 
   const handleSignUp = async (e: React.FormEvent) => {
@@ -79,10 +108,7 @@ export default function LoginPage() {
         if (data.session) {
           // 如果直接有 session，表示不需要 email confirmation，直接登入
           setSuccess('註冊成功！系統已自動為您建立帳號（預設角色：檢視者）。正在登入...');
-          setTimeout(() => {
-            router.push('/');
-            router.refresh();
-          }, 1000);
+          setTimeout(goHome, 1000);
         } else {
           // 需要 email confirmation
           setSuccess('註冊成功！請檢查您的電子郵件並點擊確認連結以啟用帳號。啟用後即可登入。');
@@ -92,8 +118,8 @@ export default function LoginPage() {
           setConfirmPassword('');
         }
       }
-    } catch (err: any) {
-      setError(err.message || '註冊失敗');
+    } catch (err) {
+      setError(err instanceof Error && err.message ? err.message : '註冊失敗');
     } finally {
       setLoading(false);
     }
@@ -182,7 +208,9 @@ export default function LoginPage() {
                 <Label htmlFor="email">電子郵件</Label>
                 <Input
                   id="email"
+                  name="email"
                   type="email"
+                  autoComplete="username"
                   placeholder="your@email.com"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
@@ -194,7 +222,9 @@ export default function LoginPage() {
                 <Label htmlFor="password">密碼</Label>
                 <Input
                   id="password"
+                  name="password"
                   type="password"
+                  autoComplete="current-password"
                   placeholder="••••••••"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
