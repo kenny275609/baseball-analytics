@@ -27,12 +27,17 @@ export default function GamesPage() {
   useEffect(() => {
     fetch('/api/games/list')
       .then(async (res) => {
+        // 403 = 帳號待核准，交給 Navbar 導向 /pending，維持載入中不顯示錯誤
+        if (res.status === 403) return;
         const data = await res.json();
         if (!res.ok) throw new Error(data.error);
         setGames(data.games);
+        setLoading(false);
       })
-      .catch(() => setError('載入比賽失敗。若是第一次使用，請確認已執行 migration 011。'))
-      .finally(() => setLoading(false));
+      .catch(() => {
+        setError('載入比賽失敗，請稍後再試。');
+        setLoading(false);
+      });
   }, []);
 
   return (

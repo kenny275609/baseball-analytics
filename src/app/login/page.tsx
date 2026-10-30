@@ -107,11 +107,11 @@ export default function LoginPage() {
         // 檢查是否需要 email confirmation
         if (data.session) {
           // 如果直接有 session，表示不需要 email confirmation，直接登入
-          setSuccess('註冊成功！系統已自動為您建立帳號（預設角色：檢視者）。正在登入...');
+          setSuccess('註冊成功！帳號需等待管理員核准後才能查看資料。正在登入...');
           setTimeout(goHome, 1000);
         } else {
           // 需要 email confirmation
-          setSuccess('註冊成功！請檢查您的電子郵件並點擊確認連結以啟用帳號。啟用後即可登入。');
+          setSuccess('註冊成功！請檢查您的電子郵件並點擊確認連結以啟用帳號。啟用後還需等待管理員核准才能查看資料。');
           setIsSignUp(false);
           setEmail('');
           setPassword('');

@@ -91,6 +91,9 @@ export async function requireAuth(): Promise<SessionUser> {
 
 export async function requireRole(allowedRoles: UserRole[]): Promise<SessionUser> {
   const session = await requireAuth();
+  if (session.role === 'pending') {
+    redirect('/pending');
+  }
   if (!allowedRoles.includes(session.role)) {
     redirect('/');
   }
