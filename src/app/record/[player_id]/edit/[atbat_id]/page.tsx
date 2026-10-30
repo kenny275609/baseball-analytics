@@ -23,7 +23,6 @@ interface AtbatData extends AtbatResultFields {
 export default function EditAtbatPage() {
   const params = useParams();
   const router = useRouter();
-  const playerId = params.player_id as string;
   const atbatId = params.atbat_id as string;
   const { user, loading: sessionLoading, canEdit } = useSession();
   const [atbat, setAtbat] = useState<AtbatData | null>(null);
@@ -38,10 +37,10 @@ export default function EditAtbatPage() {
   }, [sessionLoading, user, canEdit, router]);
 
   useEffect(() => {
-    fetch(`/api/atbats/list?player=${playerId}`)
+    fetch(`/api/atbats/${atbatId}`)
       .then((res) => res.json())
       .then((data) => {
-        const found: AtbatData | undefined = data.atbats?.find((a: AtbatData) => a.id === atbatId);
+        const found: AtbatData | undefined = data.atbat;
         if (!found) return;
         setAtbat(found);
         setInning(found.inning);
@@ -55,7 +54,7 @@ export default function EditAtbatPage() {
         });
       })
       .finally(() => setLoading(false));
-  }, [playerId, atbatId]);
+  }, [atbatId]);
 
   const handleSubmit = async () => {
     if (!atbat || !draft.result) return;

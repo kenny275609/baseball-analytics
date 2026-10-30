@@ -53,10 +53,10 @@ export default function PlayerPage() {
       .then((res) => res.json())
       .then((data) => setAtbats(data.atbats || []))
       .finally(() => setLoading(false));
-    fetch('/api/players/list')
+    fetch(`/api/players/${playerId}`)
       .then((res) => res.json())
       .then((data) => {
-        const p = data.players?.find((x: { id: string }) => x.id === playerId);
+        const p = data.player;
         if (p) setPlayerName(p.number ? `#${p.number} ${p.name}` : p.name);
       });
   }, [playerId]);

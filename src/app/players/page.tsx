@@ -25,7 +25,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import type { UserRole } from '@/lib/roles';
+import { useSession } from '@/lib/useSession';
 
 interface Player {
   id: string;
@@ -34,15 +34,9 @@ interface Player {
   created_at: string;
 }
 
-interface SessionUser {
-  id: string;
-  email: string;
-  role: UserRole;
-}
-
 export default function PlayersPage() {
+  const { canEdit, isAdmin } = useSession();
   const [players, setPlayers] = useState<Player[]>([]);
-  const [user, setUser] = useState<SessionUser | null>(null);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
@@ -54,19 +48,8 @@ export default function PlayersPage() {
   const [error, setError] = useState('');
 
   useEffect(() => {
-    fetchUser();
     fetchPlayers();
   }, []);
-
-  const fetchUser = async () => {
-    try {
-      const response = await fetch('/api/auth/getSession');
-      const data = await response.json();
-      setUser(data.user);
-    } catch (error) {
-      console.error('Error fetching user:', error);
-    }
-  };
 
   const fetchPlayers = async () => {
     try {
@@ -172,8 +155,6 @@ export default function PlayersPage() {
     setDeleteOpen(true);
   };
 
-  const canEdit = user?.role === 'editor' || user?.role === 'admin';
-
   return (
     <div className="container mx-auto px-4 py-8">
       <div className="flex items-center justify-between mb-6">
@@ -266,7 +247,7 @@ export default function PlayersPage() {
                           >
                             編輯
                           </Button>
-                          {user?.role === 'admin' && (
+                          {isAdmin && (
                             <Button
                               variant="destructive"
                               size="sm"

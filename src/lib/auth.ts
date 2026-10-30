@@ -13,14 +13,17 @@ export interface SessionUser {
 
 export async function getSession(): Promise<SessionUser | null> {
   const supabase = await createClient();
-  
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
 
-  if (!user) {
+  // getClaims 在專案使用非對稱 JWT 簽章金鑰時直接在本機驗證，不用每次打 Auth server；
+  // 舊的對稱金鑰專案會自動退回 getUser 的網路驗證，結果一樣可靠
+  const { data } = await supabase.auth.getClaims();
+  const claims = data?.claims;
+
+  if (!claims?.sub) {
     return null;
   }
+
+  const user = { id: claims.sub, email: typeof claims.email === 'string' ? claims.email : '' };
 
   // 使用更直接的方式讀取 profile，並加入錯誤處理和調試
   const { data: profile, error: profileError } = await supabase

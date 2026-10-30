@@ -171,9 +171,15 @@ export default function GamePage() {
           note: draft.note,
         }),
       });
-      if (!res.ok) throw new Error((await res.json()).error);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      // 直接接上新打席並推進打者，不用整場重抓
+      const nextAtbats = [...atbats, data.atbat as Atbat];
+      setAtbats(nextAtbats);
+      const next = nextState(nextAtbats, lineup);
+      setSlot(next.slot);
+      setInning(next.inning);
       setDraft(EMPTY_DRAFT);
-      await load(true);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {
       setError(err instanceof Error && err.message ? err.message : '儲存失敗');
@@ -196,7 +202,7 @@ export default function GamePage() {
     }
     // 刪掉最後一筆＝復原，打者和局數跟著退回
     const isLast = atbats[atbats.length - 1]?.id === atbat.id;
-    await load(false);
+    setAtbats((prev) => prev.filter((a) => a.id !== atbat.id));
     if (isLast) {
       if (atbat.batting_order) setSlot(atbat.batting_order);
       if (atbat.inning) setInning(atbat.inning);

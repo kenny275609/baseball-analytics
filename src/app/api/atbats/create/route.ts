@@ -22,7 +22,8 @@ export async function POST(request: Request) {
     const { data: atbat, error } = await supabase
       .from('atbats')
       .insert({ ...parsed.row, player_id: body.player_id, game_id: body.game_id })
-      .select()
+      // 帶上球員名字，前端可直接 append 到比賽打席列表不用整份重抓
+      .select('*, players(name, number)')
       .single();
 
     if (error) {

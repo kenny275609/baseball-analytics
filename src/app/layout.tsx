@@ -13,6 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 import { Navbar } from '@/components/Navbar';
+import { SessionProvider } from '@/lib/useSession';
 
 export const metadata: Metadata = {
   title: "Baseball Keep Web",
@@ -38,8 +39,6 @@ export const viewport: Viewport = {
   themeColor: "#3b82f6",
   width: "device-width",
   initialScale: 1,
-  maximumScale: 1,
-  userScalable: false,
   viewportFit: "cover",
 };
 
@@ -53,8 +52,10 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        <Navbar />
-        {children}
+        <SessionProvider>
+          <Navbar />
+          {children}
+        </SessionProvider>
       </body>
     </html>
   );

@@ -45,6 +45,9 @@ export async function updateSession(request: NextRequest) {
   // IMPORTANT: Avoid writing any logic between createServerClient and
   // supabase.auth.getUser(). A simple mistake could make it very hard to debug
   // issues with users being randomly logged out.
+  //
+  // 這裡刻意保留 getUser（而非 getClaims）：getClaims 在本機驗 JWT 不會碰到 Supabase，
+  // 資料庫被暫停時就偵測不到，下面的 503 提示頁會失效。API 端的 getSession 已改用 getClaims。
 
   const {
     data: { user },

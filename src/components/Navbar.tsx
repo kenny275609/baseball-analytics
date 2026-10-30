@@ -1,45 +1,23 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { ROLE_COLORS, ROLE_LABELS, type UserRole } from '@/lib/roles';
-
-interface SessionUser {
-  id: string;
-  email: string;
-  role: UserRole;
-}
+import { ROLE_COLORS, ROLE_LABELS } from '@/lib/roles';
+import { useSession } from '@/lib/useSession';
 
 export function Navbar() {
-  const [user, setUser] = useState<SessionUser | null>(null);
-  const [loading, setLoading] = useState(true);
+  const { user, loading, clear } = useSession();
   const router = useRouter();
   const pathname = usePathname();
   const supabase = createClient();
 
-  // 換頁時重新取得使用者資訊（登入後導回首頁時才會立刻顯示）
-  useEffect(() => {
-    fetchUser();
-  }, [pathname]);
-
-  const fetchUser = async () => {
-    try {
-      const response = await fetch('/api/auth/getSession');
-      const data = await response.json();
-      setUser(data.user);
-    } catch (error) {
-      console.error('Error fetching user:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const handleLogout = async () => {
     await supabase.auth.signOut();
+    clear();
     router.push('/login');
     router.refresh();
   };
