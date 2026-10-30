@@ -6,11 +6,12 @@ import Link from 'next/link';
 import { createClient } from '@/lib/supabase/client';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { ROLE_COLORS, ROLE_LABELS, type UserRole } from '@/lib/roles';
 
 interface SessionUser {
   id: string;
   email: string;
-  role: 'admin' | 'editor' | 'viewer';
+  role: UserRole;
 }
 
 export function Navbar() {
@@ -43,18 +44,13 @@ export function Navbar() {
     router.refresh();
   };
 
-  const getRoleColor = (role: string) => {
-    switch (role) {
-      case 'admin':
-        return 'bg-red-500';
-      case 'editor':
-        return 'bg-blue-500';
-      case 'viewer':
-        return 'bg-gray-500';
-      default:
-        return 'bg-gray-500';
+  // 尚未核准的帳號一律導到待核准頁
+  const isPending = user?.role === 'pending';
+  useEffect(() => {
+    if (isPending && pathname !== '/pending') {
+      router.replace('/pending');
     }
-  };
+  }, [isPending, pathname, router]);
 
   if (loading) {
     return (
@@ -83,16 +79,16 @@ export function Navbar() {
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <Link href="/" className="text-lg font-bold mr-1">⚾</Link>
-            {user && navLink('/', '比賽', pathname === '/' || pathname.startsWith('/games'))}
-            {user && navLink('/players', '球員', pathname.startsWith('/players') || pathname.startsWith('/stats'))}
+            {user && !isPending && navLink('/', '比賽', pathname === '/' || pathname.startsWith('/games'))}
+            {user && !isPending && navLink('/players', '球員', pathname.startsWith('/players') || pathname.startsWith('/stats'))}
           </div>
           <div className="flex items-center gap-2">
             {user && (
               <>
                 <div className="flex items-center gap-2">
                   <span className="hidden sm:inline text-sm text-gray-600">{user.email}</span>
-                  <Badge className={getRoleColor(user.role)}>
-                    {user.role === 'admin' ? '管理員' : user.role === 'editor' ? '編輯者' : '檢視者'}
+                  <Badge className={ROLE_COLORS[user.role] ?? 'bg-gray-500'}>
+                    {ROLE_LABELS[user.role] ?? user.role}
                   </Badge>
                 </div>
                 {user.role === 'admin' && (

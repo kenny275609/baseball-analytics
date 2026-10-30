@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import {
@@ -13,11 +12,13 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
+import { useSession } from '@/lib/useSession';
+import { ASSIGNABLE_ROLES, ROLE_COLORS, ROLE_LABELS, type UserRole } from '@/lib/roles';
 
 interface User {
   id: string;
   email: string;
-  role: 'admin' | 'editor' | 'viewer';
+  role: UserRole;
   created_at: string;
 }
 
@@ -25,7 +26,9 @@ export default function AdminUsersPage() {
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState<string | null>(null);
+  const [error, setError] = useState('');
   const router = useRouter();
+  const { user: currentUser } = useSession();
 
   useEffect(() => {
     fetchUsers();
@@ -47,8 +50,9 @@ export default function AdminUsersPage() {
     }
   };
 
-  const handleRoleChange = async (userId: string, newRole: 'admin' | 'editor' | 'viewer') => {
+  const handleRoleChange = async (userId: string, newRole: UserRole) => {
     setUpdating(userId);
+    setError('');
     try {
       const response = await fetch('/api/admin/users', {
         method: 'POST',
@@ -58,37 +62,15 @@ export default function AdminUsersPage() {
 
       if (response.ok) {
         fetchUsers();
+      } else {
+        const data = await response.json().catch(() => ({}));
+        setError(data.error || '更新角色失敗');
       }
     } catch (error) {
       console.error('Error updating role:', error);
+      setError('更新角色失敗');
     } finally {
       setUpdating(null);
-    }
-  };
-
-  const getRoleColor = (role: string) => {
-    switch (role) {
-      case 'admin':
-        return 'bg-red-500';
-      case 'editor':
-        return 'bg-blue-500';
-      case 'viewer':
-        return 'bg-gray-500';
-      default:
-        return 'bg-gray-500';
-    }
-  };
-
-  const getRoleLabel = (role: string) => {
-    switch (role) {
-      case 'admin':
-        return '管理員';
-      case 'editor':
-        return '編輯者';
-      case 'viewer':
-        return '檢視者';
-      default:
-        return role;
     }
   };
 
@@ -100,9 +82,26 @@ export default function AdminUsersPage() {
     );
   }
 
+  // 待核准的排最前面
+  const pendingCount = users.filter((u) => u.role === 'pending').length;
+  const sortedUsers = [...users].sort(
+    (a, b) => Number(b.role === 'pending') - Number(a.role === 'pending')
+  );
+
   return (
     <div className="container mx-auto px-4 py-8">
       <h1 className="text-3xl font-bold mb-6">使用者管理</h1>
+
+      {pendingCount > 0 && (
+        <div className="mb-4 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          有 {pendingCount} 位新註冊的使用者等待核准，請在下方將角色改為檢視者、編輯者或管理員。
+        </div>
+      )}
+      {error && (
+        <div className="mb-4 rounded-md border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {error}
+        </div>
+      )}
 
       <Card>
         <CardHeader>
@@ -119,37 +118,47 @@ export default function AdminUsersPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {users.map((user) => (
-                <TableRow key={user.id}>
-                  <TableCell className="font-medium">{user.email}</TableCell>
-                  <TableCell>
-                    <Badge className={getRoleColor(user.role)}>
-                      {getRoleLabel(user.role)}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>
-                    {new Date(user.created_at).toLocaleDateString('zh-TW')}
-                  </TableCell>
-                  <TableCell>
-                    <Select
-                      value={user.role}
-                      onValueChange={(value) =>
-                        handleRoleChange(user.id, value as 'admin' | 'editor' | 'viewer')
-                      }
-                      disabled={updating === user.id}
-                    >
-                      <SelectTrigger className="w-32">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="viewer">檢視者</SelectItem>
-                        <SelectItem value="editor">編輯者</SelectItem>
-                        <SelectItem value="admin">管理員</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </TableCell>
-                </TableRow>
-              ))}
+              {sortedUsers.map((user) => {
+                const isSelf = user.id === currentUser?.id;
+                return (
+                  <TableRow key={user.id} className={user.role === 'pending' ? 'bg-amber-50' : undefined}>
+                    <TableCell className="font-medium">
+                      {user.email}
+                      {isSelf && <span className="ml-1 text-xs text-gray-500">（你）</span>}
+                    </TableCell>
+                    <TableCell>
+                      <Badge className={ROLE_COLORS[user.role] ?? 'bg-gray-500'}>
+                        {ROLE_LABELS[user.role] ?? user.role}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>
+                      {new Date(user.created_at).toLocaleDateString('zh-TW')}
+                    </TableCell>
+                    <TableCell>
+                      {isSelf ? (
+                        <span className="text-xs text-gray-500">不能修改自己的角色</span>
+                      ) : (
+                        <Select
+                          value={user.role}
+                          onValueChange={(value) => handleRoleChange(user.id, value as UserRole)}
+                          disabled={updating === user.id}
+                        >
+                          <SelectTrigger className="w-32">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {ASSIGNABLE_ROLES.map((role) => (
+                              <SelectItem key={role} value={role}>
+                                {ROLE_LABELS[role]}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
             </TableBody>
           </Table>
         </CardContent>
@@ -157,6 +166,3 @@ export default function AdminUsersPage() {
     </div>
   );
 }
-
-
-

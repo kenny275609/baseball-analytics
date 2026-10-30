@@ -1,8 +1,9 @@
 import { createClient } from '@/lib/supabase/server';
 import { redirect } from 'next/navigation';
 import { NextResponse } from 'next/server';
+import type { UserRole } from '@/lib/roles';
 
-export type UserRole = 'admin' | 'editor' | 'viewer';
+export type { UserRole };
 
 export interface SessionUser {
   id: string;
@@ -43,19 +44,19 @@ export async function getSession(): Promise<SessionUser | null> {
   // 如果讀取失敗，記錄錯誤並嘗試建立 profile
   if (profileError || !profile) {
     
-    // 嘗試建立 profile
+    // 嘗試建立 profile（只能建立 pending，需管理員核准）
     const { error: insertError } = await supabase.from('profiles').insert({
       id: user.id,
-      role: 'viewer',
+      role: 'pending',
     });
 
     if (insertError) {
       console.error('Error creating profile:', insertError);
-      // 如果建立也失敗，可能是 RLS 問題，使用預設值
+      // 如果建立也失敗，可能是 RLS 問題，當作尚未核准（不可預設給讀取權限）
       return {
         id: user.id,
         email: user.email || '',
-        role: 'viewer' as UserRole,
+        role: 'pending' as UserRole,
       };
     }
 
@@ -69,7 +70,7 @@ export async function getSession(): Promise<SessionUser | null> {
     return {
       id: user.id,
       email: user.email || '',
-      role: (newProfile?.role as UserRole) || 'viewer',
+      role: (newProfile?.role as UserRole) || 'pending',
     };
   }
 
@@ -104,6 +105,9 @@ export async function authorize(
   const session = await getSession();
   if (!session) {
     return { error: NextResponse.json({ error: '請先登入' }, { status: 401 }) };
+  }
+  if (session.role === 'pending') {
+    return { error: NextResponse.json({ error: '帳號待管理員核准' }, { status: 403 }) };
   }
   if (!allowedRoles.includes(session.role)) {
     return { error: NextResponse.json({ error: '權限不足' }, { status: 403 }) };

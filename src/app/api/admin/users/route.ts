@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { authorize } from '@/lib/auth';
+import { ASSIGNABLE_ROLES } from '@/lib/roles';
 
 export async function GET() {
   try {
@@ -68,10 +69,18 @@ export async function POST(request: Request) {
       );
     }
 
-    if (!['admin', 'editor', 'viewer'].includes(role)) {
+    if (!ASSIGNABLE_ROLES.includes(role)) {
       return NextResponse.json(
         { error: 'Invalid role' },
         { status: 400 }
+      );
+    }
+
+    // 不能改自己的角色，避免管理員誤把自己降級而失去管理權限
+    if (id === auth.session.id) {
+      return NextResponse.json(
+        { error: '不能修改自己的角色' },
+        { status: 403 }
       );
     }
 
@@ -83,6 +92,13 @@ export async function POST(request: Request) {
       .single();
 
     if (error) {
+      // DB trigger prevent_last_admin_removal 擋下
+      if (error.message?.includes('cannot remove the last admin')) {
+        return NextResponse.json(
+          { error: '至少要保留一位管理員' },
+          { status: 409 }
+        );
+      }
       throw error;
     }
 

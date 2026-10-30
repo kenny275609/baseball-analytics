@@ -72,10 +72,10 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json({ player }, { status: 200 });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Error updating player:', error);
     return NextResponse.json(
-      { error: error.message || 'Failed to update player' },
+      { error: (error as { message?: string })?.message || 'Failed to update player' },
       { status: 500 }
     );
   }

@@ -63,10 +63,10 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json({ player }, { status: 201 });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Error creating player:', error);
     return NextResponse.json(
-      { error: error.message || 'Failed to create player' },
+      { error: (error as { message?: string })?.message || 'Failed to create player' },
       { status: 500 }
     );
   }

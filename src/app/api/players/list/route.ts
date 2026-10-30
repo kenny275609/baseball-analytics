@@ -19,12 +19,12 @@ export async function GET() {
     }
 
     return NextResponse.json({ players: players || [] }, { status: 200 });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Error fetching players:', error);
     return NextResponse.json(
-      { 
+      {
         error: 'Failed to fetch players',
-        details: error?.message || 'Unknown error'
+        details: (error as { message?: string })?.message || 'Unknown error'
       },
       { status: 500 }
     );

@@ -1,11 +1,12 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import type { UserRole } from '@/lib/roles';
 
 export interface SessionUser {
   id: string;
   email: string;
-  role: 'admin' | 'editor' | 'viewer';
+  role: UserRole;
 }
 
 export function useSession() {
