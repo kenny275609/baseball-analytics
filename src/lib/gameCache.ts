@@ -1,6 +1,8 @@
 // 最近開過的比賽資料存在手機上：離線時從比賽列表切回比賽頁，還能看到壘包/打序並繼續記錄
 // （畫面上會提示是上次載入的資料；紀錄照樣進離線佇列，連線後伺服器會檢查衝突）
-import type { KeyValueStorage } from '@/lib/offlineQueue';
+import { applySynced } from '@/lib/offlineQueue';
+import type { KeyValueStorage, QueueItem } from '@/lib/offlineQueue';
+import type { RunnerEvent } from '@/lib/baserunning';
 
 const PREFIX = 'bk:game-cache:';
 const INDEX_KEY = 'bk:game-cache-index';
@@ -44,6 +46,29 @@ export function readCachedGame<T>(storage: KeyValueStorage, gameId: string): T |
     return parsed && typeof parsed === 'object' && parsed.game ? (parsed as T) : null;
   } catch {
     return null;
+  }
+}
+
+// 離線紀錄同步成功（可能不在比賽頁、或之後重新載入失敗）：把伺服器回傳的紀錄接到快取上，
+// 之後離線打開比賽頁才不會少掉已上傳的紀錄。沒有快取就不用處理
+export function patchCachedGame(
+  storage: KeyValueStorage,
+  gameId: string,
+  item: QueueItem,
+  data: Record<string, unknown>
+): void {
+  const cached = readCachedGame<{ atbats?: { id: string }[]; runner_events?: RunnerEvent[] }>(storage, gameId);
+  if (!cached || !Array.isArray(cached.atbats)) return;
+  const applied = applySynced(cached.atbats, cached.runner_events ?? [], item, data);
+  try {
+    storage.setItem(PREFIX + gameId, JSON.stringify({ ...cached, atbats: applied.atbats, runner_events: applied.events }));
+  } catch {
+    // 存不進去：刪掉過期的快取，避免離線時顯示少了紀錄的舊資料
+    try {
+      storage.removeItem(PREFIX + gameId);
+    } catch {
+      // 忽略
+    }
   }
 }
 

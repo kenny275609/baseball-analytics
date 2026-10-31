@@ -198,12 +198,16 @@ export function isPendingId(id: string): boolean {
 }
 
 // 已經寫進伺服器（例如送出後沒收到回應，之後重新載入）但還留在佇列的動作不重複顯示；
-// 待送出的撤銷則先把伺服器上對應的紀錄藏起來
+// 待送出的撤銷則先把伺服器上對應的紀錄藏起來。
+// 被伺服器拒絕（同步暫停）的那筆和後面的動作不合併：它們是照舊畫面記的，
+// 疊在伺服器最新資料上會重複算出局/壘包，畫面先忠實顯示伺服器狀態，等使用者處理
 export function mergePending<A extends { id: string }, E extends RunnerEvent>(
   atbats: A[],
   events: E[],
-  queue: QueueItem[]
+  allQueued: QueueItem[]
 ): { atbats: (A | PendingAtbat)[]; events: (E | RunnerEvent)[] } {
+  const blockedAt = allQueued.findIndex((i) => i.error);
+  const queue = blockedAt === -1 ? allQueued : allQueued.slice(0, blockedAt);
   const cancelled = new Set(queue.filter((i) => i.kind === 'cancel').map((i) => i.clientId));
   const cancelledAtbats = new Set(
     events.filter((e) => cancelled.has(e.play_id) && e.atbat_id).map((e) => e.atbat_id as string)

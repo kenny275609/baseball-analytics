@@ -160,7 +160,18 @@ export default function GamePage() {
   const params = useParams();
   const router = useRouter();
   const gameId = params.id as string;
-  const { canEdit, isAdmin } = useSession();
+  const { user, canEdit, isAdmin } = useSession();
+  // 確認是唯讀帳號（共用手機換人登入）：不顯示、不合併上一個帳號留下的離線紀錄。
+  // 帳號還沒確認（user 為 null）時照常顯示，避免記錄的人開 App 時暫時看不到自己的紀錄
+  const hideQueue = user !== null && !canEdit;
+  const hideQueueRef = useRef(hideQueue);
+  useEffect(() => {
+    hideQueueRef.current = hideQueue;
+  }, [hideQueue]);
+  const visibleQueue = useCallback(
+    () => (hideQueueRef.current ? [] : readQueue(queueStorage(), gameId)),
+    [gameId]
+  );
 
   const [game, setGame] = useState<Game | null>(null);
   const [lineup, setLineup] = useState<LineupSlot[]>([]);
@@ -202,11 +213,11 @@ export default function GamePage() {
   // 伺服器資料 + 這支手機上還沒同步的紀錄（每次都重新讀佇列，拿最新的）
   const mergedNow = useCallback(
     () =>
-      mergePending(atbatsRef.current, eventsRef.current, readQueue(queueStorage(), gameId)) as {
+      mergePending(atbatsRef.current, eventsRef.current, visibleQueue()) as {
         atbats: Atbat[];
         events: RunnerEvent[];
       },
-    [gameId]
+    [visibleQueue]
   );
 
   // 載入途中才同步完成的離線紀錄：GET 可能在寫入之前就讀完資料庫，
@@ -215,25 +226,27 @@ export default function GamePage() {
   const syncSeq = useRef(0);
   const syncLog = useRef<{ seq: number; item: QueueItem; data: Record<string, unknown> }[]>([]);
 
+  // silent：背景重新整理（同步後），失敗就保留目前畫面，不顯示錯誤
   const load = useCallback(
-    async (advance: boolean): Promise<GameData | null> => {
+    async (advance: boolean, silent = false): Promise<GameData | null> => {
       let data: GameData & { error?: string };
       let fromCache = false;
       const since = syncSeq.current;
       let missed: typeof syncLog.current = [];
       loadsInFlight.current += 1;
       try {
-        const res = await fetch(`/api/games/get?id=${gameId}`);
+        // 球場訊號差時常常「有連線但送不出去」：逾時就當作離線，改用上次載入的資料
+        const res = await fetch(`/api/games/get?id=${gameId}`, { signal: AbortSignal.timeout?.(8000) });
         data = await res.json();
         if (!res.ok) {
-          setError(data.error || '載入失敗');
+          if (!silent) setError(data.error || '載入失敗');
           return null;
         }
       } catch {
         // 第一次載入就連不上：改用上次載入的資料，至少能繼續記錄（紀錄進離線佇列）
         const cached = loadedRef.current ? null : readCachedGame<GameData>(queueStorage(), gameId);
         if (!cached) {
-          setError('網路連線失敗，無法載入最新資料');
+          if (!silent) setError('網路連線失敗，無法載入最新資料');
           return null;
         }
         data = cached;
@@ -265,7 +278,7 @@ export default function GamePage() {
       setOppScore(data.game.opp_score?.toString() ?? '');
       if (advance) {
         // 打開 App 時還有離線紀錄：打者與局數要接在離線紀錄後面
-        const merged = mergePending(data.atbats, data.runner_events, readQueue(queueStorage(), gameId)) as {
+        const merged = mergePending(data.atbats, data.runner_events, visibleQueue()) as {
           atbats: Atbat[];
           events: RunnerEvent[];
         };
@@ -275,7 +288,7 @@ export default function GamePage() {
       }
       return data;
     },
-    [gameId]
+    [gameId, visibleQueue]
   );
 
   // 同步跑完（有紀錄送出、或被伺服器擋下）後重新載入伺服器資料：其他裝置在這段時間記的紀錄也要顯示。
@@ -283,7 +296,7 @@ export default function GamePage() {
   const refreshAfterSync = useCallback(async () => {
     const before = mergedNow();
     const prev = nextState(before.atbats, before.events, lineupRef.current);
-    if (!(await load(false))) return;
+    if (!(await load(false, true))) return;
     const after = mergedNow();
     const next = nextState(after.atbats, after.events, lineupRef.current);
     if (next.slot !== prev.slot || next.inning !== prev.inning) {
@@ -333,7 +346,8 @@ export default function GamePage() {
   }, [load]);
 
   // 其他分頁送出（或捨棄）了這場比賽的離線紀錄：這個分頁收不到同步結果，重新載入伺服器資料
-  const { items: pending, status: syncStatus } = usePendingQueue(gameId, () => void load(true));
+  const { items: queued, status: syncStatus } = usePendingQueue(gameId, () => void load(true));
+  const pending = hideQueue ? [] : queued;
 
   useEffect(() => {
     if (canEdit) {
@@ -355,6 +369,8 @@ export default function GamePage() {
   const hasRunners = bases.some(Boolean);
   const outsThisInning = outsInInning(atbats, runnerEvents, inning);
   const recording = canEdit && game?.status === 'live';
+  // 同步被擋下時不能記新紀錄：新紀錄會排在被拒絕的那筆後面，一定也會失敗
+  const recordBlocked = blockedItem !== null;
 
   // 打序列只橫向捲動到目前打者，不影響頁面上下位置
   useEffect(() => {
@@ -399,6 +415,10 @@ export default function GamePage() {
     setError('');
     try {
       const storage = queueStorage();
+      if (readQueue(storage, gameId)[0]?.error) {
+        setError('同步已暫停，請先處理上方被拒絕的紀錄（重試或捨棄）再記錄');
+        return false;
+      }
       const direct = readQueue(storage, gameId).length === 0 && isOnline();
       if (!addToQueue(item)) {
         setError('手機儲存空間不足，這筆紀錄沒有存下來，請清出空間後再記錄');
@@ -831,7 +851,7 @@ export default function GamePage() {
                     <Button
                       variant="outline"
                       className="h-11"
-                      disabled={!hasRunners || saving || undoing}
+                      disabled={!hasRunners || saving || undoing || recordBlocked}
                       onClick={() => {
                         setError('');
                         dialogSeq.current += 1;
@@ -934,12 +954,12 @@ export default function GamePage() {
                 variant="outline"
                 className="h-12 shrink-0 px-3"
                 onClick={() => startSave(true)}
-                disabled={!currentSlot || saving}
+                disabled={!currentSlot || saving || recordBlocked}
               >
                 調整去向
               </Button>
             )}
-            <Button className="flex-1 min-w-0 h-12 text-base" onClick={() => startSave()} disabled={!draft.result || !currentSlot || saving}>
+            <Button className="flex-1 min-w-0 h-12 text-base" onClick={() => startSave()} disabled={!draft.result || !currentSlot || saving || recordBlocked}>
               <span className="truncate">
                 {saving
                   ? '儲存中...'

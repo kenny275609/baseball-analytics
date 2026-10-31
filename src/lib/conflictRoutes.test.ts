@@ -4,6 +4,8 @@ import type { ExistingPlay } from '@/lib/idempotency';
 
 const mocks = vi.hoisted(() => ({
   existing: { kind: 'none' } as ExistingPlay,
+  // 依序回傳的 findExistingPlay 結果，用完後回傳 existing
+  existingSeq: [] as ExistingPlay[],
   conflict: { ok: true } as { ok: true } | { ok: false; error: string },
   checkRunners: vi.fn(),
   checkExpected: vi.fn(),
@@ -16,7 +18,7 @@ vi.mock('@/lib/basesServer', () => ({ checkRunnersInDb: mocks.checkRunners }));
 vi.mock('@/lib/conflictServer', () => ({ checkExpectedInDb: mocks.checkExpected }));
 vi.mock('@/lib/idempotency', async (orig) => ({
   ...(await orig<typeof import('@/lib/idempotency')>()),
-  findExistingPlay: async () => mocks.existing,
+  findExistingPlay: async () => mocks.existingSeq.shift() ?? mocks.existing,
 }));
 
 import { POST as createAtbat } from '@/app/api/atbats/create/route';
@@ -54,6 +56,7 @@ const playBody = {
 
 beforeEach(() => {
   mocks.existing = { kind: 'none' };
+  mocks.existingSeq = [];
   mocks.checkRunners.mockReset().mockResolvedValue({ kind: 'ok' });
   mocks.checkExpected.mockReset().mockImplementation(async () => mocks.conflict);
   mocks.conflict = { ok: false, error: '衝突' };
@@ -75,6 +78,14 @@ describe('POST /api/atbats/create 衝突規則', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ duplicate: true, atbat: { id: 'a1' } });
     expect(mocks.checkExpected).not.toHaveBeenCalled();
+  });
+
+  it('衝突檢查途中同一個 client_id 的另一個重送剛好寫入：200 duplicate，不回 409', async () => {
+    mocks.existingSeq = [{ kind: 'none' }, { kind: 'atbat', atbat: { id: 'a1' }, events: [] }];
+    const res = await createAtbat(post(atbatBody));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ duplicate: true, atbat: { id: 'a1' } });
+    expect(mocks.checkExpected).toHaveBeenCalledTimes(1);
   });
 
   it('expected_last 格式錯誤：400', async () => {

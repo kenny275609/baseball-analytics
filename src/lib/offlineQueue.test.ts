@@ -226,6 +226,20 @@ describe('合併畫面：伺服器資料 + 未同步紀錄', () => {
     expect(m.atbats).toEqual([]);
     expect(m.events).toEqual([]);
   });
+
+  it('同步被擋下：被拒絕的那筆和後面的紀錄不疊在伺服器資料上（不重複算出局/壘包）', () => {
+    const ok = atbatItem(1, [batter(P2, 1), runner(P1, 1, 2)]);
+    const rejected = { ...atbatItem(2, [batter(P3, null)], { result: 'strikeout' }), error: '衝突' };
+    const later = atbatItem(3, [batter(P1, null)], { result: 'strikeout' });
+    const m = mergePending(serverAtbats, serverEvents, [ok, rejected, later]);
+    expect(m.atbats.map((a) => a.id)).toEqual(['sa1', `pending:${ok.clientId}`]);
+    expect(outsInInning(m.atbats as never, m.events, 1)).toBe(0);
+
+    // 第一筆就被擋下：畫面就是伺服器資料
+    const blocked = mergePending(serverAtbats, serverEvents, [{ ...ok, error: '衝突' }, later]);
+    expect(blocked.atbats.map((a) => a.id)).toEqual(['sa1']);
+    expect(blocked.events).toEqual(serverEvents);
+  });
 });
 
 describe('同步', () => {

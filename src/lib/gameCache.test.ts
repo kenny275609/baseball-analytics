@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_CACHED_GAMES, clearCachedGames, readCachedGame, saveCachedGame } from '@/lib/gameCache';
-import type { KeyValueStorage } from '@/lib/offlineQueue';
+import { MAX_CACHED_GAMES, clearCachedGames, patchCachedGame, readCachedGame, saveCachedGame } from '@/lib/gameCache';
+import { buildAtbatItem } from '@/lib/offlineQueue';
+import type { KeyValueStorage, QueueItem } from '@/lib/offlineQueue';
 
 function memoryStorage(): KeyValueStorage & { keys: () => string[] } {
   const m = new Map<string, string>();
@@ -48,5 +49,34 @@ describe('gameCache', () => {
       },
     };
     expect(() => saveCachedGame(full, 'g1', data('g1'))).not.toThrow();
+  });
+
+  it('背景同步成功的紀錄接到快取上（離線再打開比賽頁不會少），沒有快取就不建立', () => {
+    const s = memoryStorage();
+    const item = buildAtbatItem(
+      {
+        gameId: 'g1', playerId: 'p1', player: null, battingOrder: 1, inning: 1, result: 'strikeout',
+        quality: null, rbi: 0, hitX: null, hitY: null, note: '', moves: [], label: 'a',
+      },
+      'c1'
+    );
+    const synced = {
+      atbat: { id: 'a1' },
+      runner_events: [{ id: 'e1', play_id: 'c1', atbat_id: 'a1' }],
+    };
+    patchCachedGame(s, 'g1', item, synced);
+    expect(readCachedGame(s, 'g1')).toBeNull();
+
+    saveCachedGame(s, 'g1', data('g1'));
+    patchCachedGame(s, 'g1', item, synced);
+    patchCachedGame(s, 'g1', item, synced); // 重複接不會多一筆
+    const cached = readCachedGame<ReturnType<typeof data>>(s, 'g1');
+    expect(cached?.atbats).toEqual([{ id: 'a1' }]);
+    expect(cached?.runner_events).toEqual([{ id: 'e1', play_id: 'c1', atbat_id: 'a1' }]);
+    expect(cached?.game).toEqual({ id: 'g1' });
+
+    // 撤銷同步後從快取拿掉
+    patchCachedGame(s, 'g1', { ...item, kind: 'cancel' } as QueueItem, { deleted: 1 });
+    expect(readCachedGame<ReturnType<typeof data>>(s, 'g1')?.atbats).toEqual([]);
   });
 });

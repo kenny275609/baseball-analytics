@@ -15,6 +15,7 @@ import {
   requestFor,
   syncGame,
 } from '@/lib/offlineQueue';
+import { patchCachedGame } from '@/lib/gameCache';
 
 export type SyncEvent =
   | { type: 'change'; gameId: string | null }
@@ -126,6 +127,7 @@ export async function runSync(gameId: string): Promise<SyncResult> {
   const run = async (): Promise<SyncResult> => {
     emit({ type: 'status', gameId, status: { state: 'syncing' } });
     const result = await syncGame(storage, gameId, sendItem, (item, data) => {
+      patchCachedGame(storage, gameId, item, data);
       emit({ type: 'synced', gameId, item, data });
       notifyChange(gameId);
     });

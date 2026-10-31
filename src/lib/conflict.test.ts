@@ -196,4 +196,25 @@ describe('checkExpectedInDb', () => {
     });
     expect(await checkExpectedInDb(client, GAME, { kind: 'client', client_id: CLIENT })).toEqual({ ok: true });
   });
+
+  it('前一筆排隊紀錄是非打擊跑壘（atbat_id 為 null）：以 play_id 比對伺服器最後一筆', async () => {
+    const ok = mockClient({
+      atbats: [{ data: [atbat(AB_X, '2026-10-31T10:00:00Z')], error: null }],
+      runner_events: [
+        { data: [event(uuid(40), CLIENT, null, '2026-10-31T10:05:00Z')], error: null }, // 最後一個非打擊跑壘
+        { data: [{ atbat_id: null }], error: null }, // client_id 對應的是跑壘 play
+      ],
+    });
+    expect(await checkExpectedInDb(ok, GAME, { kind: 'client', client_id: CLIENT })).toEqual({ ok: true });
+
+    // 之後其他裝置又記了打席：衝突
+    const conflict = mockClient({
+      atbats: [{ data: [atbat(AB_Y, '2026-10-31T10:06:00Z')], error: null }],
+      runner_events: [
+        { data: [event(uuid(40), CLIENT, null, '2026-10-31T10:05:00Z')], error: null },
+        { data: [{ atbat_id: null }], error: null },
+      ],
+    });
+    expect(await checkExpectedInDb(conflict, GAME, { kind: 'client', client_id: CLIENT })).toMatchObject({ ok: false });
+  });
 });
