@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { authorize } from '@/lib/auth';
-import { isStandaloneType, parseRunnerInputs } from '@/lib/baserunning';
+import { isStandaloneType, isUuid, parseRunnerInputs } from '@/lib/baserunning';
 import { isMissingTable, syncGameScore } from '@/lib/score';
 
 // 兩個打席之間的跑壘（盜壘、暴投、捕逸、牽制…），同一次送出的跑者算同一個 play
@@ -13,7 +13,7 @@ export async function POST(request: Request) {
 
     const body = await request.json();
     const inning = Number(body.inning);
-    if (!body.game_id || !Number.isInteger(inning) || inning < 1 || inning > 30) {
+    if (!isUuid(body.game_id) || !Number.isInteger(inning) || inning < 1 || inning > 30) {
       return NextResponse.json({ error: '缺少比賽或局數' }, { status: 400 });
     }
     if (!isStandaloneType(body.event_type)) {

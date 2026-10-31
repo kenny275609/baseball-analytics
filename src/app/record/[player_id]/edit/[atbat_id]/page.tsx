@@ -95,7 +95,9 @@ export default function EditAtbatPage() {
           batting_order: atbat.batting_order,
         }),
       });
-      if (!res.ok) throw new Error((await res.json()).error);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      if (data.warning) window.alert(data.warning);
       router.back();
     } catch (err) {
       setError(err instanceof Error && err.message ? err.message : '儲存失敗');

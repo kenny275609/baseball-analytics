@@ -110,10 +110,15 @@ export function runsByInning(events: RunnerEvent[]): Map<number, number> {
   return runs;
 }
 
-// 有跑壘資料（或還沒開打）的比賽，我方比分由跑壘事件推算；
-// 舊比賽有打席卻沒有任何事件，比分維持手動輸入
-export function isTracked(atbatCount: number, eventCount: number): boolean {
-  return eventCount > 0 || atbatCount === 0;
+// 每個打席都有跑壘事件（或還沒開打）的比賽，我方比分由跑壘事件推算；
+// 只要混有沒有事件的舊打席（舊比賽重新開啟後繼續記錄也一樣），比分維持手動輸入，
+// 避免既有的手動比分被「只算新事件」的分數覆蓋
+export function isTracked(
+  atbats: { id: string }[],
+  events: { atbat_id: string | null }[]
+): boolean {
+  const withEvents = new Set(events.map((e) => e.atbat_id).filter(Boolean));
+  return atbats.every((a) => withEvents.has(a.id));
 }
 
 // ============================================
@@ -127,7 +132,7 @@ export interface RunnerMove {
   to: number | null; // 停在原壘時 to === from
 }
 
-const BATTER_DEFAULT: Partial<Record<ResultCode, number | null>> = {
+export const BATTER_DEFAULT: Partial<Record<ResultCode, number | null>> = {
   single: 1,
   double: 2,
   triple: 3,
@@ -152,7 +157,12 @@ function forcedAdvance(bases: Bases): Record<number, number> {
   return to;
 }
 
-export function defaultMoves(code: ResultCode, bases: Bases, batter: Runner): RunnerMove[] {
+export function defaultMoves(
+  code: ResultCode,
+  bases: Bases,
+  batter: Runner,
+  outsBefore = 0
+): RunnerMove[] {
   const occupied = ([3, 2, 1] as const).filter((b) => bases[b]);
   const batterTo = BATTER_DEFAULT[code] ?? null;
   const forced = forcedAdvance(bases);
@@ -189,7 +199,7 @@ export function defaultMoves(code: ResultCode, bases: Bases, batter: Runner): Ru
     }
   };
 
-  return [
+  const moves: RunnerMove[] = [
     { playerId: batter.playerId, player: batter.player, from: 0, to: batterTo },
     ...occupied.map((b) => ({
       playerId: bases[b]!.playerId,
@@ -198,6 +208,13 @@ export function defaultMoves(code: ResultCode, bases: Bases, batter: Runner): Ru
       to: runnerTo(b),
     })),
   ];
+
+  // 這個 play 造成第 3 出局（例如 2 出局野選封殺）：其他跑者不預填推進/得分，
+  // 封殺或打者出局形成的第 3 出局，同一個 play 回本壘也不算分
+  if (outsBefore + movesOuts(moves) >= 3) {
+    return moves.map((m) => (m.from > 0 && m.to !== null ? { ...m, to: m.from } : m));
+  }
+  return moves;
 }
 
 // 失誤、雙殺、三殺依規則不給打點，其他就是本次 play 回本壘的人數
@@ -206,14 +223,22 @@ export function autoRbi(code: ResultCode, moves: RunnerMove[]): number {
   return Math.min(4, moves.filter((m) => m.to === 4).length);
 }
 
-// 回傳錯誤訊息；null 表示合法
-export function validateMoves(moves: RunnerMove[]): string | null {
+// 回傳錯誤訊息；null 表示合法（前後端共用，moves 需包含停在原壘的跑者）
+export function validateMoves(moves: Pick<RunnerMove, 'from' | 'to'>[]): string | null {
   const taken = new Set<number>();
   for (const m of moves) {
-    if (m.to === null || m.to === 4) continue;
+    if (m.to === null) continue;
     if (m.to < m.from || (m.from === 0 && m.to === 0)) return '跑者不能往回跑';
+    if (m.to === 4) continue;
     if (taken.has(m.to)) return `${m.to} 壘不能同時有兩位跑者`;
     taken.add(m.to);
+  }
+  // 後位跑者不能超越前位跑者（出局的跑者不算；兩人都得分沒問題）
+  const alive = moves.filter((m) => m.to !== null).sort((a, b) => a.from - b.from);
+  for (let i = 0; i + 1 < alive.length; i++) {
+    const back = alive[i].to!;
+    const front = alive[i + 1].to!;
+    if (back > front || (back === front && back !== 4)) return '後面的跑者不能超越前面的跑者';
   }
   return null;
 }
@@ -232,11 +257,18 @@ export interface RunnerEventInput {
   to_base: number | null;
 }
 
-// 只保留真正有移動的跑者（停在原壘不用記錄）；格式錯誤回傳 null
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isUuid(value: unknown): value is string {
+  return typeof value === 'string' && UUID_RE.test(value);
+}
+
+// 先用完整輸入（含停在原壘的跑者）檢查壘包衝突與超越，
+// 再只保留真正有移動的跑者（停在原壘不用記錄）；格式錯誤回傳 null
 export function parseRunnerInputs(value: unknown, allowBatter: boolean): RunnerEventInput[] | null {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value) || value.length > 4) return null;
-  const rows: RunnerEventInput[] = [];
+  const all: RunnerEventInput[] = [];
   const fromSeen = new Set<number>();
   for (const raw of value) {
     if (!raw || typeof raw !== 'object') return null;
@@ -247,11 +279,13 @@ export function parseRunnerInputs(value: unknown, allowBatter: boolean): RunnerE
     if (fromSeen.has(from)) return null;
     fromSeen.add(from);
     if (to !== null && (!Number.isInteger(to) || to < from || to > 4)) return null;
-    if (to === from) continue;
-    const playerId = typeof r.player_id === 'string' && r.player_id ? r.player_id : null;
-    rows.push({ runner_player_id: playerId, from_base: from, to_base: to });
+    // 非 UUID 會讓 insert 失敗，在寫入打席之前就擋下
+    if (r.player_id !== undefined && r.player_id !== null && r.player_id !== '' && !isUuid(r.player_id)) return null;
+    const playerId = isUuid(r.player_id) ? r.player_id : null;
+    all.push({ runner_player_id: playerId, from_base: from, to_base: to });
   }
-  return rows;
+  if (validateMoves(all.map((r) => ({ from: r.from_base, to: r.to_base })))) return null;
+  return all.filter((r) => r.to_base !== r.from_base);
 }
 
 export function isStandaloneType(value: unknown): value is RunnerEventType {

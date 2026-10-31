@@ -11,7 +11,8 @@ interface ScoreboardProps {
   oppTotal: number | null;
   currentInning: number | null;
   // 有傳入時對手每局得分可直接編輯
-  onOppChange?: (inning: number, value: string) => void;
+  // 回傳是否儲存成功
+  onOppChange?: (inning: number, value: string) => Promise<boolean>;
 }
 
 // 簡易逐局記分板：先攻在上、後攻在下
@@ -56,8 +57,15 @@ export function Scoreboard({
                 min="0"
                 max="99"
                 defaultValue={value ?? ''}
-                onBlur={(e) => {
-                  if (e.target.value !== (value?.toString() ?? '')) onOppChange(i, e.target.value);
+                onBlur={async (e) => {
+                  const input = e.currentTarget;
+                  const saved = value?.toString() ?? '';
+                  const next = input.value.trim();
+                  if (next === saved) return;
+                  const n = Number(next);
+                  const valid = next === '' || (Number.isInteger(n) && n >= 0 && n <= 99);
+                  // 格式不符或儲存失敗時還原成目前的值，避免輸入框和總分不一致
+                  if (!valid || !(await onOppChange(i, next))) input.value = saved;
                 }}
                 className="w-9 h-9 rounded-md border text-center text-base [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none"
                 aria-label={`${opponent} 第 ${i} 局得分`}

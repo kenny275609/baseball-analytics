@@ -30,6 +30,7 @@ import {
   computeBases,
   defaultMoves,
   isTracked,
+  movesOuts,
   outsInInning,
   runsByInning,
   standaloneLabel,
@@ -197,14 +198,19 @@ export default function GamePage() {
     }
   }, [slot, lineup, recording]);
 
-  // 壘上有人：先逐一詢問跑者去向；壘上無人：打者落點依結果決定，直接記錄
-  const startSave = () => {
+  // 壘上有人：先逐一詢問跑者去向；壘上無人：打者落點依結果決定，直接記錄。
+  // 壘上無人但結果的出局數和預設去向對不上（野選、雙殺…），或使用者要調整打者去向
+  // （不死三振、安打趁傳多跑一個壘）時，也打開對話框
+  const startSave = (adjust = false) => {
     if (!currentSlot || !draft.result) return;
-    const moves = defaultMoves(draft.result, bases, {
-      playerId: currentSlot.player_id,
-      player: currentSlot.players,
-    });
-    if (moves.length > 1) {
+    const moves = defaultMoves(
+      draft.result,
+      bases,
+      { playerId: currentSlot.player_id, player: currentSlot.players },
+      outsThisInning
+    );
+    const mismatch = movesOuts(moves) !== (getResultOption(draft.result)?.outs ?? 0);
+    if (adjust || moves.length > 1 || mismatch) {
       dialogSeq.current += 1;
       setRunnersDialog({ key: dialogSeq.current, moves });
     } else {
@@ -292,7 +298,10 @@ export default function GamePage() {
   const deleteAtbat = async (atbat: Atbat) => {
     const label = getResultOption(fieldsToResult(atbat))?.label ?? '';
     if (deletingId) return;
-    if (!window.confirm(`刪除 ${atbat.players?.name ?? ''} 的「${label}」？這個打席的跑壘紀錄會一起刪除。`)) return;
+    // 這個打席之後還有記錄的非打擊跑壘（盜壘、牽制…）不會一起刪除，先提醒
+    const laterPlays = eventsRef.current.some((e) => !e.atbat_id && e.created_at > atbat.created_at);
+    const note = laterPlays ? '\n之後記錄的盜壘／暴投等跑壘事件不會一起刪除，請一併確認。' : '';
+    if (!window.confirm(`刪除 ${atbat.players?.name ?? ''} 的「${label}」？這個打席的跑壘紀錄會一起刪除。${note}`)) return;
     setDeletingId(atbat.id);
     setError('');
     try {
@@ -306,14 +315,18 @@ export default function GamePage() {
       const isLast = current[current.length - 1]?.id === atbat.id;
       const remaining = current.filter((a) => a.id !== atbat.id);
       const remainingEvents = eventsRef.current.filter((e) => e.atbat_id !== atbat.id);
+      // 刪除前的 laterPlays 可能已過期，用最新的事件重新判斷
+      const hasLaterPlays = remainingEvents.some((e) => !e.atbat_id && e.created_at > atbat.created_at);
       atbatsRef.current = remaining;
       eventsRef.current = remainingEvents;
       setAtbats((prev) => prev.filter((a) => a.id !== atbat.id));
       setRunnerEvents((prev) => prev.filter((e) => e.atbat_id !== atbat.id));
       if (isLast) {
-        // 刪掉最後一筆＝復原，打者和局數跟著退回，壘包由剩下的跑壘事件重新推算
+        // 刪掉最後一筆＝復原，打者跟著退回，壘包由剩下的跑壘事件重新推算
         if (atbat.batting_order) setSlot(atbat.batting_order);
-        if (atbat.inning) setInning(atbat.inning);
+        // 之後還有非打擊跑壘時，局數依剩下的紀錄推算，不直接退回這個打席的局數
+        if (hasLaterPlays) setInning(nextState(remaining, remainingEvents, lineupRef.current).inning);
+        else if (atbat.inning) setInning(atbat.inning);
       } else {
         // 刪中間的打席可能讓某局不滿 3 出局，局數要重算
         setInning(nextState(remaining, remainingEvents, lineupRef.current).inning);
@@ -348,22 +361,35 @@ export default function GamePage() {
     }
   };
 
-  const saveOppRuns = async (inn: number, value: string) => {
-    setError('');
-    const res = await fetch('/api/games/innings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ game_id: gameId, inning: inn, opp_runs: value }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      setError(data.error || '更新對手得分失敗');
-      return;
-    }
-    setInnings((prev) => {
-      const rest = prev.filter((i) => i.inning !== inn);
-      return value === '' ? rest : [...rest, { inning: inn, opp_runs: Number(value) }];
-    });
+  // 逐局連續輸入時依序送出，避免兩個請求同時重算比分、後讀先寫
+  const oppQueue = useRef<Promise<unknown>>(Promise.resolve());
+  const saveOppRuns = (inn: number, value: string): Promise<boolean> => {
+    const run = async () => {
+      setError('');
+      try {
+        const res = await fetch('/api/games/innings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ game_id: gameId, inning: inn, opp_runs: value }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setError(data.error || '更新對手得分失敗');
+          return false;
+        }
+      } catch {
+        setError('更新對手得分失敗');
+        return false;
+      }
+      setInnings((prev) => {
+        const rest = prev.filter((i) => i.inning !== inn);
+        return value === '' ? rest : [...rest, { inning: inn, opp_runs: Number(value) }];
+      });
+      return true;
+    };
+    const result = oppQueue.current.then(run);
+    oppQueue.current = result;
+    return result;
   };
 
   const substitute = async (playerId: string) => {
@@ -415,7 +441,7 @@ export default function GamePage() {
     lineup.find((l) => l.player_id === id)?.players ?? atbats.find((a) => a.player_id === id)?.players ?? null;
 
   // 記分板：有跑壘資料的比賽我方逐局得分由事件推算，舊比賽只有手動總分
-  const tracked = isTracked(atbats.length, runnerEvents.length);
+  const tracked = isTracked(atbats, runnerEvents);
   const ourRuns = runsByInning(runnerEvents);
   const oppRuns = new Map(innings.map((i) => [i.inning, i.opp_runs]));
   const ourTotal = tracked ? [...ourRuns.values()].reduce((s, n) => s + n, 0) : game.our_score;
@@ -513,7 +539,13 @@ export default function GamePage() {
             currentInning={game.status === 'live' ? inning : null}
             onOppChange={canEdit ? saveOppRuns : undefined}
           />
-          {canEdit && <p className="text-xs text-gray-500">對手每局得分直接在記分板輸入；我方得分由跑壘紀錄自動計算。</p>}
+          {canEdit && (
+            <p className="text-xs text-gray-500">
+              {tracked
+                ? '對手每局得分直接在記分板輸入；我方得分由跑壘紀錄自動計算。'
+                : '這場比賽有沒有跑壘紀錄的舊打席，我方比分請在下方手動輸入。'}
+            </p>
+          )}
         </CardContent>
       </Card>
 
@@ -570,8 +602,19 @@ export default function GamePage() {
 
       {recording && (
         <div className="fixed bottom-0 inset-x-0 border-t bg-white/95 backdrop-blur p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-          <div className="max-w-2xl mx-auto">
-            <Button className="w-full h-12 text-base" onClick={startSave} disabled={!draft.result || !currentSlot || saving}>
+          <div className="max-w-2xl mx-auto flex gap-2">
+            {!hasRunners && draft.result && (
+              // 壘上無人時預設直接記錄；不死三振、安打趁傳多跑一個壘等情況從這裡調整打者去向
+              <Button
+                variant="outline"
+                className="h-12 shrink-0 px-3"
+                onClick={() => startSave(true)}
+                disabled={!currentSlot || saving}
+              >
+                調整去向
+              </Button>
+            )}
+            <Button className="flex-1 h-12 text-base" onClick={() => startSave()} disabled={!draft.result || !currentSlot || saving}>
               {saving
                 ? '儲存中...'
                 : draft.result

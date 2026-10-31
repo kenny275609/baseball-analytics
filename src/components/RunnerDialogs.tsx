@@ -52,7 +52,7 @@ function MovePicker({ move, onChange }: { move: RunnerMove; onChange: (to: numbe
               key={String(to)}
               type="button"
               onClick={() => onChange(to)}
-              className={`h-11 rounded-lg border-2 text-sm font-semibold transition-colors ${
+              className={`h-11 rounded-lg border-2 px-1 text-xs sm:text-sm whitespace-nowrap font-semibold transition-colors ${
                 active
                   ? tone === 'blue'
                     ? 'bg-blue-800 border-blue-800 text-white'
@@ -95,6 +95,11 @@ function OutsSummary({ moves, outsBefore }: { moves: RunnerMove[]; outsBefore: n
     <p className="text-sm text-gray-600">
       這個 play：{outs} 出局、{runs} 分 · 本局將 {total} 出局
       {total > 3 && <span className="text-red-600">（超過 3 出局，請確認）</span>}
+      {total >= 3 && outs > 0 && runs > 0 && (
+        <span className="block text-amber-700">
+          第 3 出局若是打者出局或封殺，這個 play 回本壘不算得分，請確認
+        </span>
+      )}
     </p>
   );
 }

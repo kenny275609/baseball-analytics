@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { authorize } from '@/lib/auth';
 import { parseAtbatInput } from '@/lib/atbat';
-import { parseRunnerInputs } from '@/lib/baserunning';
+import { isUuid, parseRunnerInputs } from '@/lib/baserunning';
 import { isMissingTable, syncGameScore } from '@/lib/score';
 
 export async function POST(request: Request) {
@@ -12,7 +12,7 @@ export async function POST(request: Request) {
     const supabase = await createClient();
 
     const body = await request.json();
-    if (!body.player_id || !body.game_id) {
+    if (!isUuid(body.player_id) || !isUuid(body.game_id)) {
       return NextResponse.json({ error: '缺少球員或比賽' }, { status: 400 });
     }
 
@@ -68,8 +68,21 @@ export async function POST(request: Request) {
           warning = '跑壘資料表尚未建立，這次只記錄打席';
         } else {
           // 沒有交易可用，手動把剛建立的打席撤回，避免打席和跑壘不一致
-          await supabase.from('atbats').delete().eq('id', atbat.id);
-          throw eventsError;
+          console.error('Error creating runner events:', eventsError);
+          const { data: removed, error: rollbackError } = await supabase
+            .from('atbats')
+            .delete()
+            .eq('id', atbat.id)
+            .select('id');
+          if (rollbackError || !removed?.length) {
+            console.error('Error rolling back atbat:', atbat.id, rollbackError);
+            await syncGameScore(supabase, body.game_id);
+            return NextResponse.json(
+              { error: '跑壘資料儲存失敗，且打席未能撤回；請重新整理後刪除這筆打席再重記' },
+              { status: 500 }
+            );
+          }
+          return NextResponse.json({ error: '跑壘資料儲存失敗，打席未記錄，請再試一次' }, { status: 500 });
         }
       } else {
         runnerEvents = data ?? [];
