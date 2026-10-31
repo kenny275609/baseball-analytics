@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { pendingGameIds, readQueue } from '@/lib/offlineQueue';
-import { queueStorage, subscribe, syncAll } from '@/lib/offlineSync';
+import { isQueueStorageEvent, queueStorage, subscribe, syncAll } from '@/lib/offlineSync';
 
 const RETRY_MS = 20000;
 
@@ -28,6 +28,9 @@ export function OfflineSyncer() {
     const sync = () => {
       void syncAll().finally(refresh);
     };
+    const onStorage = (e: StorageEvent) => {
+      if (isQueueStorageEvent(e)) refresh();
+    };
     const onVisible = () => {
       if (document.visibilityState === 'visible') sync();
     };
@@ -35,7 +38,7 @@ export function OfflineSyncer() {
     sync();
     const unsubscribe = subscribe((e) => e.type === 'change' && refresh());
     window.addEventListener('online', sync);
-    window.addEventListener('storage', refresh);
+    window.addEventListener('storage', onStorage);
     document.addEventListener('visibilitychange', onVisible);
     const timer = window.setInterval(() => {
       if (pendingGameIds(queueStorage()).length > 0) sync();
@@ -43,7 +46,7 @@ export function OfflineSyncer() {
     return () => {
       unsubscribe();
       window.removeEventListener('online', sync);
-      window.removeEventListener('storage', refresh);
+      window.removeEventListener('storage', onStorage);
       document.removeEventListener('visibilitychange', onVisible);
       window.clearInterval(timer);
     };

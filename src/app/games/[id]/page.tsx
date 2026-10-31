@@ -40,6 +40,7 @@ import {
 } from '@/lib/baserunning';
 import {
   QueueItem,
+  applySynced,
   buildAtbatItem,
   buildPlayItem,
   clearBlock,
@@ -59,7 +60,7 @@ import {
   subscribe,
   usePendingQueue,
 } from '@/lib/offlineSync';
-import { UndoTarget, latestAction, sameTarget } from '@/lib/undo';
+import { UndoTarget, latestAction, sameTarget, timeKey } from '@/lib/undo';
 
 interface PlayerRef {
   name: string;
@@ -164,7 +165,6 @@ export default function GamePage() {
   // 伺服器上的打席/跑壘；畫面顯示的 atbats / runnerEvents 另外加上還沒同步的離線紀錄
   const [serverAtbats, setAtbats] = useState<Atbat[]>([]);
   const [serverEvents, setRunnerEvents] = useState<RunnerEvent[]>([]);
-  const { items: pending, status: syncStatus } = usePendingQueue(gameId);
   const [undoing, setUndoing] = useState(false);
   const [innings, setInnings] = useState<InningScore[]>([]);
   const [players, setPlayers] = useState<Player[]>([]);
@@ -204,9 +204,18 @@ export default function GamePage() {
     [gameId]
   );
 
+  // 載入途中才同步完成的離線紀錄：GET 可能在寫入之前就讀完資料庫，
+  // 回應到了要把這些紀錄補回去，否則它們已離開佇列、又不在伺服器資料裡，會從畫面消失
+  const loadsInFlight = useRef(0);
+  const syncSeq = useRef(0);
+  const syncLog = useRef<{ seq: number; item: QueueItem; data: Record<string, unknown> }[]>([]);
+
   const load = useCallback(
     async (advance: boolean): Promise<GameData | null> => {
       let data: GameData & { error?: string };
+      const since = syncSeq.current;
+      let missed: typeof syncLog.current = [];
+      loadsInFlight.current += 1;
       try {
         const res = await fetch(`/api/games/get?id=${gameId}`);
         data = await res.json();
@@ -217,9 +226,18 @@ export default function GamePage() {
       } catch {
         setError('網路連線失敗，無法載入最新資料');
         return null;
+      } finally {
+        loadsInFlight.current -= 1;
+        missed = syncLog.current.filter((entry) => entry.seq > since);
+        if (loadsInFlight.current === 0) syncLog.current = [];
       }
       data.runner_events = data.runner_events ?? [];
       data.innings = data.innings ?? [];
+      for (const entry of missed) {
+        const applied = applySynced(data.atbats, data.runner_events, entry.item, entry.data);
+        data.atbats = applied.atbats;
+        data.runner_events = applied.events;
+      }
       atbatsRef.current = data.atbats;
       eventsRef.current = data.runner_events;
       lineupRef.current = data.lineup;
@@ -250,23 +268,14 @@ export default function GamePage() {
     () =>
       subscribe((e) => {
         if (e.type !== 'synced' || e.gameId !== gameId) return;
-        if (e.item.kind === 'cancel') {
-          const cancelled = e.item.clientId;
-          const atbatIds = new Set(
-            eventsRef.current.filter((ev) => ev.play_id === cancelled && ev.atbat_id).map((ev) => ev.atbat_id)
-          );
-          atbatsRef.current = atbatsRef.current.filter((a) => !atbatIds.has(a.id));
-          eventsRef.current = eventsRef.current.filter((ev) => ev.play_id !== cancelled);
-        } else {
-          const atbat = e.data.atbat as Atbat | undefined;
-          const created = (e.data.runner_events ?? []) as RunnerEvent[];
-          if (atbat && !atbatsRef.current.some((a) => a.id === atbat.id)) {
-            atbatsRef.current = [...atbatsRef.current, atbat];
-          }
-          const known = new Set(eventsRef.current.map((ev) => ev.id));
-          eventsRef.current = [...eventsRef.current, ...created.filter((ev) => !known.has(ev.id))];
-          if (typeof e.data.warning === 'string') setError(e.data.warning);
+        if (loadsInFlight.current > 0) {
+          syncSeq.current += 1;
+          syncLog.current.push({ seq: syncSeq.current, item: e.item, data: e.data });
         }
+        const applied = applySynced(atbatsRef.current, eventsRef.current, e.item, e.data);
+        atbatsRef.current = applied.atbats;
+        eventsRef.current = applied.events;
+        if (e.item.kind !== 'cancel' && typeof e.data.warning === 'string') setError(e.data.warning);
         setAtbats(atbatsRef.current);
         setRunnerEvents(eventsRef.current);
       }),
@@ -276,6 +285,9 @@ export default function GamePage() {
   useEffect(() => {
     load(true).finally(() => setLoading(false));
   }, [load]);
+
+  // 其他分頁送出（或捨棄）了這場比賽的離線紀錄：這個分頁收不到同步結果，重新載入伺服器資料
+  const { items: pending, status: syncStatus } = usePendingQueue(gameId, () => void load(true));
 
   useEffect(() => {
     if (canEdit) {
@@ -340,14 +352,19 @@ export default function GamePage() {
     try {
       const storage = queueStorage();
       const direct = readQueue(storage, gameId).length === 0 && isOnline();
-      addToQueue(item);
+      if (!addToQueue(item)) {
+        setError('手機儲存空間不足，這筆紀錄沒有存下來，請清出空間後再記錄');
+        return false;
+      }
       if (!direct) {
         void runSync(gameId);
         return true;
       }
       const result = await runSync(gameId);
       const stillQueued = readQueue(storage, gameId).some((i) => i.clientId === item.clientId);
-      if (!stillQueued || result.status === 'offline' || result.status === 'busy') return true;
+      // 登入過期：留在佇列，重新登入後自動上傳（和提示訊息一致）
+      const keep = result.status === 'offline' || result.status === 'busy' || (result.status === 'retry' && result.auth);
+      if (!stillQueued || keep) return true;
       removeItem(storage, gameId, item.clientId);
       resetStatus(gameId);
       notifyChange(gameId);
@@ -418,7 +435,7 @@ export default function GamePage() {
       if (result.kind === 'cancelQueued') void runSync(gameId);
       const merged = mergedNow();
       const next = nextState(merged.atbats, merged.events, lineupRef.current);
-      if (target.kind === 'atbat') setSlot(next.slot);
+      setSlot(next.slot);
       setInning(next.inning);
       return;
     }
@@ -452,8 +469,9 @@ export default function GamePage() {
         return;
       }
       if (fresh) {
+        // 撤銷的 play 可能是其他裝置在新打席之後記的，打者也要跟著伺服器資料
         const next = nextState(fresh.atbats, fresh.runner_events, fresh.lineup);
-        if (target.kind === 'atbat') setSlot(next.slot);
+        setSlot(next.slot);
         setInning(next.inning);
       }
     } catch {
@@ -490,7 +508,7 @@ export default function GamePage() {
     const label = getResultOption(fieldsToResult(atbat))?.label ?? '';
     if (deletingId) return;
     // 這個打席之後還有記錄的非打擊跑壘（牽制、投手犯規…）不會一起刪除，先提醒
-    const laterPlays = eventsRef.current.some((e) => !e.atbat_id && e.created_at > atbat.created_at);
+    const laterPlays = eventsRef.current.some((e) => !e.atbat_id && timeKey(e.created_at) > timeKey(atbat.created_at));
     const note = laterPlays ? '\n之後記錄的牽制等跑壘事件不會一起刪除，請一併確認。' : '';
     if (!window.confirm(`刪除 ${atbat.players?.name ?? ''} 的「${label}」？這個打席的跑壘紀錄會一起刪除。${note}`)) return;
     setDeletingId(atbat.id);
@@ -507,7 +525,7 @@ export default function GamePage() {
       const remaining = current.filter((a) => a.id !== atbat.id);
       const remainingEvents = eventsRef.current.filter((e) => e.atbat_id !== atbat.id);
       // 刪除前的 laterPlays 可能已過期，用最新的事件重新判斷
-      const hasLaterPlays = remainingEvents.some((e) => !e.atbat_id && e.created_at > atbat.created_at);
+      const hasLaterPlays = remainingEvents.some((e) => !e.atbat_id && timeKey(e.created_at) > timeKey(atbat.created_at));
       atbatsRef.current = remaining;
       eventsRef.current = remainingEvents;
       setAtbats((prev) => prev.filter((a) => a.id !== atbat.id));
@@ -660,7 +678,8 @@ export default function GamePage() {
   for (const [playId, events] of plays) {
     pushItem(events[0].inning, { kind: 'play', at: events[0].created_at, playId, events });
   }
-  for (const items of byInning.values()) items.sort((x, y) => (x.at < y.at ? 1 : x.at > y.at ? -1 : 0));
+  // 暫存紀錄（toISOString）和伺服器的 timestamptz 寫法不同，不能直接比字串
+  for (const items of byInning.values()) items.sort((x, y) => timeKey(y.at) - timeKey(x.at));
   const logInnings = [...byInning.keys()].sort((a, b) => b - a);
 
   const hitPoints = atbats
@@ -956,10 +975,14 @@ export default function GamePage() {
                       </span>
                       {canEdit && !unsynced && (
                         <>
-                          <Link href={`/record/${a.player_id}/edit/${a.id}`}>
-                            <Button variant="ghost" size="sm" className="px-2">編輯</Button>
-                          </Link>
-                          {/* 還有沒同步的紀錄時先不刪伺服器上的舊紀錄，否則排隊中的紀錄會和壘包對不上 */}
+                          {/* 還有沒同步的紀錄時先不改/刪伺服器上的舊紀錄，否則排隊中的紀錄會和壘包對不上 */}
+                          {pending.length > 0 ? (
+                            <Button variant="ghost" size="sm" className="px-2" disabled>編輯</Button>
+                          ) : (
+                            <Link href={`/record/${a.player_id}/edit/${a.id}`}>
+                              <Button variant="ghost" size="sm" className="px-2">編輯</Button>
+                            </Link>
+                          )}
                           <Button variant="ghost" size="sm" className="px-2 text-red-600" disabled={deletingId !== null || pending.length > 0} onClick={() => deleteAtbat(a)}>
                             {deletingId === a.id ? '刪除中' : '刪除'}
                           </Button>
@@ -1042,9 +1065,15 @@ export default function GamePage() {
                 <span className="text-sm text-gray-500">我方 : {game.opponent}</span>
               </div>
             )}
+            {game.status === 'live' && pending.length > 0 && (
+              <p className="text-xs text-amber-800">還有 {pending.length} 筆紀錄尚未同步，同步完成後才能結束比賽。</p>
+            )}
             <div className="flex flex-wrap gap-2">
               {game.status === 'live' ? (
-                <Button onClick={() => updateGame(tracked ? { status: 'final' } : { status: 'final', our_score: ourScore, opp_score: oppScore })}>
+                <Button
+                  disabled={pending.length > 0}
+                  onClick={() => updateGame(tracked ? { status: 'final' } : { status: 'final', our_score: ourScore, opp_score: oppScore })}
+                >
                   結束比賽
                 </Button>
               ) : (

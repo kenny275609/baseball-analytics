@@ -46,6 +46,13 @@ export async function POST(request: Request) {
     // 跑者必須真的在壘上（以資料庫裡該局的事件為準）
     const check = await checkRunnersInDb(supabase, body.game_id, inning, allRunners);
     if (check.kind === 'invalid') {
+      // 同一筆的另一個重送請求可能剛好在上面查詢之後寫入，壘包才會對不上
+      if (clientId) {
+        const existing = await findExistingPlay(supabase, body.game_id, clientId);
+        if (existing.kind === 'play') {
+          return NextResponse.json({ runner_events: existing.events, duplicate: true }, { status: 200 });
+        }
+      }
       return NextResponse.json({ error: check.error }, { status: 400 });
     }
     if (check.kind === 'missing') {

@@ -71,19 +71,38 @@ export function queueKey(gameId: string): string {
   return KEY_PREFIX + gameId;
 }
 
+// localStorage 被改壞（或舊版格式）的項目直接略過，避免畫面合併時讀到缺欄位的資料而整頁壞掉
+function isQueueItem(value: unknown): value is QueueItem {
+  if (!value || typeof value !== 'object') return false;
+  const i = value as Record<string, unknown>;
+  if (typeof i.clientId !== 'string' || typeof i.label !== 'string') return false;
+  if (i.kind === 'cancel') return true;
+  if (!i.body || typeof i.body !== 'object' || !i.preview || typeof i.preview !== 'object') return false;
+  const preview = i.preview as Record<string, unknown>;
+  if (!Array.isArray(preview.events)) return false;
+  if (i.kind === 'play') return true;
+  return i.kind === 'atbat' && !!preview.atbat && typeof preview.atbat === 'object';
+}
+
 export function readQueue(storage: KeyValueStorage, gameId: string): QueueItem[] {
   try {
     const raw = storage.getItem(queueKey(gameId));
     const parsed = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? parsed.filter((i) => i && typeof i.clientId === 'string') : [];
+    return Array.isArray(parsed) ? parsed.filter(isQueueItem) : [];
   } catch {
     return [];
   }
 }
 
-export function writeQueue(storage: KeyValueStorage, gameId: string, items: QueueItem[]): void {
-  if (items.length === 0) storage.removeItem(queueKey(gameId));
-  else storage.setItem(queueKey(gameId), JSON.stringify(items));
+// 寫入失敗（例如空間已滿 QuotaExceededError）回傳 false，佇列維持原狀
+export function writeQueue(storage: KeyValueStorage, gameId: string, items: QueueItem[]): boolean {
+  try {
+    if (items.length === 0) storage.removeItem(queueKey(gameId));
+    else storage.setItem(queueKey(gameId), JSON.stringify(items));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function pendingGameIds(storage: KeyValueStorage): string[] {
@@ -95,13 +114,12 @@ export function pendingGameIds(storage: KeyValueStorage): string[] {
   return ids;
 }
 
-// 同一個 client_id 不會排兩次（例如重複點擊）
+// 同一個 client_id 不會排兩次（例如重複點擊）；存不進去時回傳原本的佇列（不含這筆）
 export function enqueue(storage: KeyValueStorage, item: QueueItem): QueueItem[] {
   const items = readQueue(storage, item.gameId);
   if (items.some((i) => i.clientId === item.clientId)) return items;
   const next = [...items, item];
-  writeQueue(storage, item.gameId, next);
-  return next;
+  return writeQueue(storage, item.gameId, next) ? next : items;
 }
 
 // 每次都重新讀取再寫回，不會蓋掉同步途中新排進來的動作
@@ -197,6 +215,30 @@ export function mergePending<A extends { id: string }, E extends RunnerEvent>(
     outEvents.push(...item.preview.events);
   }
   return { atbats: outAtbats, events: outEvents };
+}
+
+// 一筆佇列動作同步成功後，把伺服器回傳的打席/跑壘接到伺服器資料上（已存在的 id 不重複加）；
+// 撤銷則刪掉那個 client_id（= play_id）的打席與跑壘
+export function applySynced<A extends { id: string }, E extends RunnerEvent>(
+  atbats: A[],
+  events: E[],
+  item: QueueItem,
+  data: Record<string, unknown>
+): { atbats: A[]; events: E[] } {
+  if (item.kind === 'cancel') {
+    const atbatIds = new Set(events.filter((e) => e.play_id === item.clientId && e.atbat_id).map((e) => e.atbat_id));
+    return {
+      atbats: atbats.filter((a) => !atbatIds.has(a.id)),
+      events: events.filter((e) => e.play_id !== item.clientId),
+    };
+  }
+  const atbat = data.atbat as A | undefined;
+  const created = (Array.isArray(data.runner_events) ? data.runner_events : []) as E[];
+  const knownEvents = new Set(events.map((e) => e.id));
+  return {
+    atbats: atbat && !atbats.some((a) => a.id === atbat.id) ? [...atbats, atbat] : atbats,
+    events: [...events, ...created.filter((e) => !knownEvents.has(e.id))],
+  };
 }
 
 // ============================================
@@ -372,7 +414,7 @@ export function classifyResponse(status: number | null, data: unknown): SendOutc
 export type SyncResult =
   | { status: 'done'; synced: number } // 佇列已清空
   | { status: 'offline'; synced: number } // 沒有連線，稍後再試
-  | { status: 'retry'; synced: number; error: string } // 暫時性錯誤，稍後再試
+  | { status: 'retry'; synced: number; error: string; auth?: boolean } // 暫時性錯誤（auth = 登入過期），稍後再試
   | { status: 'blocked'; synced: number; error: string; item: QueueItem } // 等使用者處理
   | { status: 'busy'; synced: 0 }; // 這場比賽已經在同步中
 
@@ -422,7 +464,7 @@ export async function syncGame(
 
       switch (outcome.kind) {
         case 'auth':
-          return { status: 'retry', synced, error: outcome.error };
+          return { status: 'retry', synced, error: outcome.error, auth: true };
         case 'server': {
           const serverErrors = first.serverErrors + 1;
           if (serverErrors >= MAX_SERVER_ERRORS) {

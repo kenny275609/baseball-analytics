@@ -1,7 +1,7 @@
 'use client';
 
 // 瀏覽器端的離線同步：佇列存在 localStorage，連線恢復 / App 打開 / 回到前景時依序送出
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   KeyValueStorage,
   QueueItem,
@@ -10,6 +10,7 @@ import {
   classifyResponse,
   enqueue,
   pendingGameIds,
+  queueKey,
   readQueue,
   requestFor,
   syncGame,
@@ -37,15 +38,27 @@ const memoryStorage: KeyValueStorage = {
   },
 };
 
+const QUEUE_KEY_PREFIX = queueKey('');
+
+// 只探測一次：每次都寫 bk:probe 會對其他分頁發出 storage 事件，兩個分頁會互相觸發
+let resolvedStorage: KeyValueStorage | null = null;
+
 export function queueStorage(): KeyValueStorage {
+  if (resolvedStorage) return resolvedStorage;
   try {
     const s = window.localStorage;
     s.setItem('bk:probe', '1');
     s.removeItem('bk:probe');
-    return s;
+    resolvedStorage = s;
   } catch {
-    return memoryStorage;
+    resolvedStorage = memoryStorage;
   }
+  return resolvedStorage;
+}
+
+// 其他分頁改了離線佇列（key 為 null 表示整個 localStorage 被清掉）
+export function isQueueStorageEvent(e: StorageEvent): boolean {
+  return e.key === null || e.key.startsWith(QUEUE_KEY_PREFIX);
 }
 
 const listeners = new Set<(e: SyncEvent) => void>();
@@ -69,9 +82,11 @@ export function getStatus(gameId: string): SyncStatus {
   return statuses.get(gameId) ?? { state: 'idle' };
 }
 
-export function addToQueue(item: QueueItem) {
-  enqueue(queueStorage(), item);
+// 回傳 false 表示存不進手機（儲存空間已滿）
+export function addToQueue(item: QueueItem): boolean {
+  const queued = enqueue(queueStorage(), item).some((i) => i.clientId === item.clientId);
   notifyChange(item.gameId);
+  return queued;
 }
 
 async function sendItem(item: QueueItem): Promise<SendOutcome> {
@@ -132,21 +147,38 @@ export async function syncAll(): Promise<void> {
   }
 }
 
-// 比賽頁用：這場比賽的佇列與同步狀態，跟著佇列變動與其他分頁更新
-export function usePendingQueue(gameId: string): { items: QueueItem[]; status: SyncStatus } {
+// 比賽頁用：這場比賽的佇列與同步狀態，跟著佇列變動與其他分頁更新。
+// 其他分頁把這場比賽的紀錄送出（或捨棄）後，這個分頁收不到 synced 事件，
+// 呼叫 onRemovedElsewhere 讓比賽頁重新載入伺服器資料，紀錄才不會從畫面消失
+export function usePendingQueue(
+  gameId: string,
+  onRemovedElsewhere?: () => void
+): { items: QueueItem[]; status: SyncStatus } {
   const [state, setState] = useState<{ items: QueueItem[]; status: SyncStatus }>({
     items: [],
     status: { state: 'idle' },
   });
+  const onRemovedRef = useRef(onRemovedElsewhere);
   useEffect(() => {
-    const refresh = () => setState({ items: readQueue(queueStorage(), gameId), status: getStatus(gameId) });
+    onRemovedRef.current = onRemovedElsewhere;
+  }, [onRemovedElsewhere]);
+  useEffect(() => {
+    let known: QueueItem[] = [];
+    const refresh = () => {
+      known = readQueue(queueStorage(), gameId);
+      setState({ items: known, status: getStatus(gameId) });
+    };
     refresh();
     const unsubscribe = subscribe((e) => {
       if (e.type === 'synced') return;
       if (e.gameId === null || e.gameId === gameId) refresh();
     });
     const onStorage = (e: StorageEvent) => {
-      if (e.key === null || e.key.startsWith('bk:offline-queue:')) refresh();
+      if (!isQueueStorageEvent(e)) return;
+      const before = known;
+      refresh();
+      const remaining = new Set(known.map((i) => i.clientId));
+      if (before.some((i) => !remaining.has(i.clientId))) onRemovedRef.current?.();
     };
     window.addEventListener('storage', onStorage);
     return () => {

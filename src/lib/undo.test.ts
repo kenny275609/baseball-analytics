@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RunnerEvent, computeBases, outsInInning, runsByInning } from '@/lib/baserunning';
+import { RunnerEvent, computeBases, nextTurn, outsInInning, runsByInning } from '@/lib/baserunning';
 import { resultToFields } from '@/lib/atbat';
 import { latestAction, parseUndoRequest, sameTarget, timeKey, withoutTarget } from '@/lib/undo';
 import { isUuid } from '@/lib/baserunning';
@@ -149,6 +149,27 @@ describe('撤銷後壘包、出局、比分回到前一個狀態', () => {
     expect(after.atbats).toHaveLength(1);
     expect(outsInInning(after.atbats, after.events, 1)).toBe(0);
     expect(computeBases(after.events, 1)[1]?.playerId).toBe(P1);
+  });
+
+  it('撤銷第三個出局：局數退回原本那局，打者也退回', () => {
+    // 1 局：一棒三振、二棒滾地出局、三棒飛球接殺 → 換到 2 局、輪到四棒
+    const outs = [
+      { ...atbat('o1', at(1), 'strikeout'), batting_order: 1 },
+      { ...atbat('o2', at(2), 'groundout'), batting_order: 2 },
+      { ...atbat('o3', at(3), 'flyout'), batting_order: 3 },
+    ];
+    const outEvents = [
+      ev('x1', 'q1', 'o1', P1, 0, null, at(1, 100)),
+      ev('x2', 'q2', 'o2', P2, 0, null, at(2, 100)),
+      ev('x3', 'q3', 'o3', P1, 0, null, at(3, 100)),
+    ];
+    const orders = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+    expect(nextTurn(outs, outEvents, orders)).toEqual({ slot: 4, inning: 2 });
+    const target = latestAction(outs, outEvents)!;
+    expect(target).toMatchObject({ kind: 'atbat', id: 'o3' });
+    const after = withoutTarget(outs, outEvents, target);
+    expect(outsInInning(after.atbats, after.events, 1)).toBe(2);
+    expect(nextTurn(after.atbats, after.events, orders)).toEqual({ slot: 3, inning: 1 });
   });
 
   it('連續撤銷依時間倒退', () => {

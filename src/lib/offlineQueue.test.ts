@@ -5,6 +5,7 @@ import {
   MAX_SERVER_ERRORS,
   QueueItem,
   SendOutcome,
+  applySynced,
   buildAtbatItem,
   buildPlayItem,
   classifyResponse,
@@ -121,6 +122,40 @@ describe('佇列基本操作', () => {
     expect(storage.length).toBe(0);
     storage.setItem(`bk:offline-queue:${GAME}`, '{oops');
     expect(readQueue(storage, GAME)).toEqual([]);
+  });
+
+  it('缺欄位的損壞項目略過，不會讓畫面合併時出錯', () => {
+    const good = atbatItem(1, [batter(P1, 1)]);
+    const { preview: _preview, ...noPreview } = atbatItem(2, [batter(P2, 1)]);
+    void _preview;
+    const noEvents = { ...atbatItem(3, [batter(P3, 1)]), preview: { atbat: good.preview.atbat } };
+    const noAtbat = { ...atbatItem(4, [batter(P3, 1)]), preview: { events: [] } };
+    const unknownKind = { ...good, clientId: uuid(5), kind: 'steal' };
+    storage.setItem(
+      `bk:offline-queue:${GAME}`,
+      JSON.stringify([good, noPreview, noEvents, noAtbat, unknownKind, null, 'x', { clientId: uuid(6) }])
+    );
+    const queue = readQueue(storage, GAME);
+    expect(queue.map((i) => i.clientId)).toEqual([good.clientId]);
+    expect(() => mergePending([], [], queue)).not.toThrow();
+  });
+
+  it('localStorage 寫滿（QuotaExceededError）時不會丟出例外，佇列維持原狀', () => {
+    const a = atbatItem(1, [batter(P1, 1)]);
+    enqueue(storage, a);
+    const full: KeyValueStorage = {
+      ...storage,
+      getItem: (k) => storage.getItem(k),
+      setItem: () => {
+        throw new DOMException('full', 'QuotaExceededError');
+      },
+      removeItem: (k) => storage.removeItem(k),
+      key: (i) => storage.key(i),
+      length: storage.length,
+    };
+    const b = atbatItem(2, [batter(P2, 1)]);
+    expect(enqueue(full, b).map((i) => i.clientId)).toEqual([a.clientId]);
+    expect(readQueue(storage, GAME)).toHaveLength(1);
   });
 
   it('newClientId 產生 UUID v4', () => {
@@ -291,7 +326,7 @@ describe('同步', () => {
   it('登入過期：保留紀錄、稍後再試，不會擋住', async () => {
     enqueue(storage, atbatItem(1, [batter(P1, 1)]));
     const result = await syncGame(storage, GAME, async () => ({ kind: 'auth', error: '登入已過期' }));
-    expect(result).toMatchObject({ status: 'retry' });
+    expect(result).toMatchObject({ status: 'retry', auth: true });
     expect(readQueue(storage, GAME)[0].error).toBeNull();
   });
 
@@ -414,5 +449,28 @@ describe('classifyResponse', () => {
   it('拒絕時帶伺服器的錯誤訊息', () => {
     expect(classifyResponse(400, { error: '請重新整理' })).toEqual({ kind: 'rejected', error: '請重新整理' });
     expect(classifyResponse(422, {})).toEqual({ kind: 'rejected', error: '伺服器拒絕這筆紀錄（422）' });
+  });
+});
+
+describe('同步結果接回伺服器資料（applySynced）', () => {
+  const a = atbatItem(1, [batter(P1, 1)]);
+  const serverAtbat = { ...a.preview.atbat, id: uuid(500) };
+  const serverEvents = a.preview.events.map((e) => ({ ...e, id: uuid(600), atbat_id: serverAtbat.id }));
+
+  it('載入途中同步完成的打席補回較舊的伺服器資料，已存在的不重複加', () => {
+    const data = { atbat: serverAtbat, runner_events: serverEvents };
+    const once = applySynced<typeof serverAtbat, RunnerEvent>([], [], a, data);
+    expect(once.atbats.map((x) => x.id)).toEqual([serverAtbat.id]);
+    expect(once.events.map((x) => x.id)).toEqual([uuid(600)]);
+    const twice = applySynced(once.atbats, once.events, a, data);
+    expect(twice.atbats).toHaveLength(1);
+    expect(twice.events).toHaveLength(1);
+  });
+
+  it('撤銷同步後拿掉該 client_id 的打席與跑壘', () => {
+    const cancel: QueueItem = { ...a, kind: 'cancel' } as QueueItem;
+    const after = applySynced([serverAtbat], serverEvents, cancel, { deleted: 1 });
+    expect(after.atbats).toEqual([]);
+    expect(after.events).toEqual([]);
   });
 });
