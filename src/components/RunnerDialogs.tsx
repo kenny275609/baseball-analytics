@@ -19,6 +19,7 @@ import {
   STANDALONE_EVENTS,
   autoRbi,
   movesOuts,
+  standaloneDefaults,
   validateMoves,
 } from '@/lib/baserunning';
 
@@ -178,19 +179,6 @@ export function AtbatRunnersDialog({
 // ============================================
 // 兩個打席之間：盜壘、暴投、捕逸、牽制…
 // ============================================
-
-function standaloneDefaults(type: RunnerEventType, bases: Bases): RunnerMove[] {
-  // 暴投/捕逸/投手犯規通常所有跑者各推進一個壘，其他預設留在原壘
-  const advanceAll = type === 'wild_pitch' || type === 'passed_ball' || type === 'balk';
-  return ([3, 2, 1] as const)
-    .filter((b) => bases[b])
-    .map((b) => ({
-      playerId: bases[b]!.playerId,
-      player: bases[b]!.player,
-      from: b,
-      to: advanceAll ? b + 1 : b,
-    }));
-}
 
 interface StandaloneRunnerDialogProps {
   open: boolean;

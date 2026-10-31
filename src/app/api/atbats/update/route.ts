@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { authorize } from '@/lib/auth';
 import { fieldsToResult, parseAtbatInput } from '@/lib/atbat';
-import { BATTER_DEFAULT } from '@/lib/baserunning';
+import { batterEventPatch } from '@/lib/baserunning';
 import { isMissingTable, syncGameScore } from '@/lib/score';
 
 export async function POST(request: Request) {
@@ -69,22 +69,15 @@ export async function POST(request: Request) {
       if (inningError) throw inningError;
 
       // 改了結果時，打者事件跟著新結果走；壘上還有其他跑者時無法自動推算，請使用者重記
-      const newCode = fieldsToResult(atbat);
-      if (newCode && newCode !== fieldsToResult(before)) {
-        const runnerMoved = events.some((e) => e.from_base > 0);
-        const batterEvent = events.find((e) => e.from_base === 0);
-        if (runnerMoved || !batterEvent) {
-          warning = '這個打席有其他跑者的跑壘紀錄，跑者去向沒有跟著更新；如需修正請刪除打席後重新記錄';
-        } else {
-          const to = BATTER_DEFAULT[newCode] ?? null;
-          if (to !== batterEvent.to_base) {
-            const { error: batterError } = await supabase
-              .from('runner_events')
-              .update({ to_base: to })
-              .eq('id', batterEvent.id);
-            if (batterError) throw batterError;
-          }
-        }
+      const patch = batterEventPatch(fieldsToResult(before), fieldsToResult(atbat), events);
+      if (patch.kind === 'warn') {
+        warning = '這個打席有其他跑者的跑壘紀錄，跑者去向沒有跟著更新；如需修正請刪除打席後重新記錄';
+      } else if (patch.kind === 'update') {
+        const { error: batterError } = await supabase
+          .from('runner_events')
+          .update({ to_base: patch.to })
+          .eq('id', patch.id);
+        if (batterError) throw batterError;
       }
     }
 

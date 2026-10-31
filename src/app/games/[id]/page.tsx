@@ -31,6 +31,7 @@ import {
   defaultMoves,
   isTracked,
   movesOuts,
+  nextTurn,
   outsInInning,
   runsByInning,
   standaloneLabel,
@@ -83,18 +84,8 @@ interface InningScore {
 
 const FROM_SHORT = ['打者', '一壘', '二壘', '三壘'];
 
-// 根據最後一個打席推算下一位打者，局數看最後一筆紀錄（打席或跑壘事件）：同局出局數滿 3 就換下一局
 function nextState(atbats: Atbat[], events: RunnerEvent[], lineup: LineupSlot[]) {
-  const orders = lineup.map((l) => l.batting_order);
-  const last = atbats[atbats.length - 1];
-  const lastEvent = events[events.length - 1];
-  if (!last && !lastEvent) return { slot: orders[0] ?? 1, inning: 1 };
-
-  const lastIndex = orders.indexOf(last?.batting_order ?? -1);
-  const slot = last ? orders[(lastIndex + 1) % orders.length] ?? orders[0] ?? 1 : orders[0] ?? 1;
-  const inning = Math.max(last?.inning ?? 1, lastEvent?.inning ?? 1);
-  const outs = outsInInning(atbats, events, inning);
-  return { slot, inning: outs >= 3 ? inning + 1 : inning };
+  return nextTurn(atbats, events, lineup.map((l) => l.batting_order));
 }
 
 function playerLabel(p: PlayerRef | null) {

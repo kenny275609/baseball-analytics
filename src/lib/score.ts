@@ -7,6 +7,25 @@ export function isMissingTable(error: { code?: string } | null): boolean {
   return error?.code === '42P01' || error?.code === 'PGRST205';
 }
 
+// 要寫回 games 的比分欄位；空物件表示不用更新
+export function scoreUpdates(
+  atbats: { id: string }[],
+  events: { atbat_id: string | null; to_base: number | null }[],
+  innings: { opp_runs: number | null }[]
+): { our_score?: number | null; opp_score?: number | null } {
+  const oppRuns = innings.reduce((sum, i) => sum + (i.opp_runs ?? 0), 0);
+  const nothingYet = atbats.length === 0 && events.length === 0 && innings.length === 0;
+
+  if (isTracked(atbats, events)) {
+    return {
+      our_score: nothingYet ? null : events.filter((e) => e.to_base === 4).length,
+      opp_score: nothingYet ? null : oppRuns,
+    };
+  }
+  // 舊比賽（或混有舊打席）：我方比分維持手動，對手有填每局得分才同步
+  return innings.length > 0 ? { opp_score: oppRuns } : {};
+}
+
 export async function syncGameScore(supabase: SupabaseClient, gameId: string): Promise<void> {
   try {
     const [atbatsRes, eventsRes, inningsRes] = await Promise.all([
@@ -16,20 +35,7 @@ export async function syncGameScore(supabase: SupabaseClient, gameId: string): P
     ]);
     if (atbatsRes.error || eventsRes.error || inningsRes.error) return;
 
-    const atbats = atbatsRes.data ?? [];
-    const events = eventsRes.data ?? [];
-    const innings = inningsRes.data ?? [];
-    const oppRuns = innings.reduce((sum, i) => sum + (i.opp_runs ?? 0), 0);
-    const nothingYet = atbats.length === 0 && events.length === 0 && innings.length === 0;
-
-    const updates: Record<string, number | null> = {};
-    if (isTracked(atbats, events)) {
-      updates.our_score = nothingYet ? null : events.filter((e) => e.to_base === 4).length;
-      updates.opp_score = nothingYet ? null : oppRuns;
-    } else if (innings.length > 0) {
-      // 舊比賽（或混有舊打席）：我方比分維持手動，對手有填每局得分才同步
-      updates.opp_score = oppRuns;
-    }
+    const updates = scoreUpdates(atbatsRes.data ?? [], eventsRes.data ?? [], inningsRes.data ?? []);
     if (Object.keys(updates).length > 0) {
       await supabase.from('games').update(updates).eq('id', gameId);
     }

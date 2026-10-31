@@ -217,10 +217,13 @@ export function defaultMoves(
   return moves;
 }
 
-// 失誤、雙殺、三殺依規則不給打點，其他就是本次 play 回本壘的人數
+// 失誤、雙殺、三殺、三振（得分來自暴投/捕逸）依規則不給打點，其他就是本次 play 回本壘的跑者數；
+// 打者自己回本壘只有全壘打算打點（安打再趁失誤跑回來不算）
+const NO_RBI_CODES: ResultCode[] = ['error', 'double_play', 'triple_play', 'strikeout'];
+
 export function autoRbi(code: ResultCode, moves: RunnerMove[]): number {
-  if (code === 'error' || code === 'double_play' || code === 'triple_play') return 0;
-  return Math.min(4, moves.filter((m) => m.to === 4).length);
+  if (NO_RBI_CODES.includes(code)) return 0;
+  return Math.min(4, moves.filter((m) => m.to === 4 && (m.from > 0 || code === 'homerun')).length);
 }
 
 // 回傳錯誤訊息；null 表示合法（前後端共用，moves 需包含停在原壘的跑者）
@@ -247,6 +250,50 @@ export function movesOuts(moves: RunnerMove[]): number {
   return moves.filter((m) => m.to === null).length;
 }
 
+// 兩個打席之間的事件預設去向：暴投/捕逸/投手犯規所有跑者各推進一個壘，其他預設留在原壘
+export function standaloneDefaults(type: RunnerEventType, bases: Bases): RunnerMove[] {
+  const advanceAll = type === 'wild_pitch' || type === 'passed_ball' || type === 'balk';
+  return ([3, 2, 1] as const)
+    .filter((b) => bases[b])
+    .map((b) => ({
+      playerId: bases[b]!.playerId,
+      player: bases[b]!.player,
+      from: b,
+      to: advanceAll ? b + 1 : b,
+    }));
+}
+
+// 根據最後一個打席推算下一位打者，局數看最後一筆紀錄（打席或跑壘事件）：同局出局數滿 3 就換下一局
+export function nextTurn(
+  atbats: (AtbatResultFields & { id: string; inning: number | null; batting_order: number | null })[],
+  events: RunnerEvent[],
+  orders: number[]
+): { slot: number; inning: number } {
+  const last = atbats[atbats.length - 1];
+  const lastEvent = events[events.length - 1];
+  if (!last && !lastEvent) return { slot: orders[0] ?? 1, inning: 1 };
+
+  const lastIndex = orders.indexOf(last?.batting_order ?? -1);
+  const slot = last ? orders[(lastIndex + 1) % orders.length] ?? orders[0] ?? 1 : orders[0] ?? 1;
+  const inning = Math.max(last?.inning ?? 1, lastEvent?.inning ?? 1);
+  const outs = outsInInning(atbats, events, inning);
+  return { slot, inning: outs >= 3 ? inning + 1 : inning };
+}
+
+// 修改打席結果時打者事件怎麼跟著改：
+//   none = 不用動；update = 打者事件改成新結果的預設去向；warn = 有其他跑者移動或沒有打者事件，無法自動推算
+export function batterEventPatch(
+  oldCode: ResultCode | null,
+  newCode: ResultCode | null,
+  events: { id: string; from_base: number; to_base: number | null }[]
+): { kind: 'none' } | { kind: 'warn' } | { kind: 'update'; id: string; to: number | null } {
+  if (events.length === 0 || !newCode || newCode === oldCode) return { kind: 'none' };
+  const batterEvent = events.find((e) => e.from_base === 0);
+  if (!batterEvent || events.some((e) => e.from_base > 0)) return { kind: 'warn' };
+  const to = BATTER_DEFAULT[newCode] ?? null;
+  return to === batterEvent.to_base ? { kind: 'none' } : { kind: 'update', id: batterEvent.id, to };
+}
+
 // ============================================
 // API 輸入驗證
 // ============================================
@@ -264,7 +311,8 @@ export function isUuid(value: unknown): value is string {
 }
 
 // 先用完整輸入（含停在原壘的跑者）檢查壘包衝突與超越，
-// 再只保留真正有移動的跑者（停在原壘不用記錄）；格式錯誤回傳 null
+// 再只保留真正有移動的跑者（停在原壘不用記錄）；格式錯誤回傳 null。
+// allowBatter（打席）時有送跑壘就必須包含打者，否則這個打席的打者出局/上壘會漏記
 export function parseRunnerInputs(value: unknown, allowBatter: boolean): RunnerEventInput[] | null {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value) || value.length > 4) return null;
@@ -273,17 +321,19 @@ export function parseRunnerInputs(value: unknown, allowBatter: boolean): RunnerE
   for (const raw of value) {
     if (!raw || typeof raw !== 'object') return null;
     const r = raw as Record<string, unknown>;
-    const from = Number(r.from_base);
-    const to = r.to_base === null ? null : Number(r.to_base);
-    if (!Number.isInteger(from) || from < (allowBatter ? 0 : 1) || from > 3) return null;
+    // 不做型別轉換：null / '' / true 被 Number() 轉成 0、1 會變成打者或一壘
+    const from = r.from_base;
+    const to = r.to_base;
+    if (typeof from !== 'number' || !Number.isInteger(from) || from < (allowBatter ? 0 : 1) || from > 3) return null;
     if (fromSeen.has(from)) return null;
     fromSeen.add(from);
-    if (to !== null && (!Number.isInteger(to) || to < from || to > 4)) return null;
+    if (to !== null && (typeof to !== 'number' || !Number.isInteger(to) || to < from || to > 4)) return null;
     // 非 UUID 會讓 insert 失敗，在寫入打席之前就擋下
     if (r.player_id !== undefined && r.player_id !== null && r.player_id !== '' && !isUuid(r.player_id)) return null;
     const playerId = isUuid(r.player_id) ? r.player_id : null;
     all.push({ runner_player_id: playerId, from_base: from, to_base: to });
   }
+  if (allowBatter && all.length > 0 && !fromSeen.has(0)) return null;
   if (validateMoves(all.map((r) => ({ from: r.from_base, to: r.to_base })))) return null;
   return all.filter((r) => r.to_base !== r.from_base);
 }
