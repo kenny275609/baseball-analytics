@@ -38,6 +38,28 @@ import {
   sacrificeFlyError,
   standaloneLabel,
 } from '@/lib/baserunning';
+import {
+  QueueItem,
+  buildAtbatItem,
+  buildPlayItem,
+  clearBlock,
+  isPendingId,
+  mergePending,
+  readQueue,
+  removeItem,
+  undoLatestPending,
+} from '@/lib/offlineQueue';
+import {
+  addToQueue,
+  isOnline,
+  notifyChange,
+  queueStorage,
+  resetStatus,
+  runSync,
+  subscribe,
+  usePendingQueue,
+} from '@/lib/offlineSync';
+import { UndoTarget, latestAction, sameTarget } from '@/lib/undo';
 
 interface PlayerRef {
   name: string;
@@ -99,6 +121,38 @@ function describeMove(e: RunnerEvent) {
   return `${e.players?.name ?? '?'} ${FROM_SHORT[e.from_base]}→${baseLabel(e.to_base)}`;
 }
 
+// 撤銷確認、未同步清單用的描述，例如「3 局 王小明 一壘安打（李四 一壘→三壘）」
+function describeAtbat(a: Pick<Atbat, 'inning' | 'players'> & AtbatResultFields, events: RunnerEvent[]) {
+  const moves = events.filter((e) => e.from_base > 0).map(describeMove);
+  const inn = a.inning ? `${a.inning} 局 ` : '';
+  const label = getResultOption(fieldsToResult(a))?.label ?? '打席';
+  return `${inn}${a.players?.name ?? ''} ${label}${moves.length ? `（${moves.join('、')}）` : ''}`;
+}
+
+function describePlay(events: RunnerEvent[]) {
+  const first = events[0];
+  if (!first) return '跑壘事件';
+  return `${first.inning} 局 ${standaloneLabel(first.event_type)}（${events.map(describeMove).join('、')}）`;
+}
+
+function describeTarget(target: UndoTarget, atbats: Atbat[], events: RunnerEvent[]) {
+  if (target.kind === 'play') return describePlay(events.filter((e) => e.play_id === target.play_id));
+  const atbat = atbats.find((a) => a.id === target.id);
+  return atbat ? describeAtbat(atbat, events.filter((e) => e.atbat_id === atbat.id)) : '打席';
+}
+
+interface GameData {
+  game: Game;
+  lineup: LineupSlot[];
+  atbats: Atbat[];
+  runner_events: RunnerEvent[];
+  innings: InningScore[];
+}
+
+function PendingTag() {
+  return <span className="ml-1 rounded bg-amber-100 px-1 text-[11px] font-normal text-amber-800">待同步</span>;
+}
+
 export default function GamePage() {
   const params = useParams();
   const router = useRouter();
@@ -107,8 +161,11 @@ export default function GamePage() {
 
   const [game, setGame] = useState<Game | null>(null);
   const [lineup, setLineup] = useState<LineupSlot[]>([]);
-  const [atbats, setAtbats] = useState<Atbat[]>([]);
-  const [runnerEvents, setRunnerEvents] = useState<RunnerEvent[]>([]);
+  // 伺服器上的打席/跑壘；畫面顯示的 atbats / runnerEvents 另外加上還沒同步的離線紀錄
+  const [serverAtbats, setAtbats] = useState<Atbat[]>([]);
+  const [serverEvents, setRunnerEvents] = useState<RunnerEvent[]>([]);
+  const { items: pending, status: syncStatus } = usePendingQueue(gameId);
+  const [undoing, setUndoing] = useState(false);
   const [innings, setInnings] = useState<InningScore[]>([]);
   const [players, setPlayers] = useState<Player[]>([]);
   const [loading, setLoading] = useState(true);
@@ -132,32 +189,87 @@ export default function GamePage() {
   const lineupRef = useRef<LineupSlot[]>([]);
   const eventsRef = useRef<RunnerEvent[]>([]);
   useEffect(() => {
-    atbatsRef.current = atbats;
+    atbatsRef.current = serverAtbats;
     lineupRef.current = lineup;
-    eventsRef.current = runnerEvents;
-  }, [atbats, lineup, runnerEvents]);
+    eventsRef.current = serverEvents;
+  }, [serverAtbats, lineup, serverEvents]);
+
+  // 伺服器資料 + 這支手機上還沒同步的紀錄（每次都重新讀佇列，拿最新的）
+  const mergedNow = useCallback(
+    () =>
+      mergePending(atbatsRef.current, eventsRef.current, readQueue(queueStorage(), gameId)) as {
+        atbats: Atbat[];
+        events: RunnerEvent[];
+      },
+    [gameId]
+  );
 
   const load = useCallback(
-    async (advance: boolean) => {
-      const res = await fetch(`/api/games/get?id=${gameId}`);
-      const data = await res.json();
-      if (!res.ok) {
-        setError(data.error || '載入失敗');
-        return;
+    async (advance: boolean): Promise<GameData | null> => {
+      let data: GameData & { error?: string };
+      try {
+        const res = await fetch(`/api/games/get?id=${gameId}`);
+        data = await res.json();
+        if (!res.ok) {
+          setError(data.error || '載入失敗');
+          return null;
+        }
+      } catch {
+        setError('網路連線失敗，無法載入最新資料');
+        return null;
       }
+      data.runner_events = data.runner_events ?? [];
+      data.innings = data.innings ?? [];
+      atbatsRef.current = data.atbats;
+      eventsRef.current = data.runner_events;
+      lineupRef.current = data.lineup;
       setGame(data.game);
       setLineup(data.lineup);
       setAtbats(data.atbats);
-      setRunnerEvents(data.runner_events ?? []);
-      setInnings(data.innings ?? []);
+      setRunnerEvents(data.runner_events);
+      setInnings(data.innings);
       setOurScore(data.game.our_score?.toString() ?? '');
       setOppScore(data.game.opp_score?.toString() ?? '');
       if (advance) {
-        const next = nextState(data.atbats, data.runner_events ?? [], data.lineup);
+        // 打開 App 時還有離線紀錄：打者與局數要接在離線紀錄後面
+        const merged = mergePending(data.atbats, data.runner_events, readQueue(queueStorage(), gameId)) as {
+          atbats: Atbat[];
+          events: RunnerEvent[];
+        };
+        const next = nextState(merged.atbats, merged.events, data.lineup);
         setSlot(next.slot);
         setInning(next.inning);
       }
+      return data;
     },
+    [gameId]
+  );
+
+  // 離線紀錄同步成功：把伺服器回傳的打席/跑壘接上，取代畫面上的暫存版本
+  useEffect(
+    () =>
+      subscribe((e) => {
+        if (e.type !== 'synced' || e.gameId !== gameId) return;
+        if (e.item.kind === 'cancel') {
+          const cancelled = e.item.clientId;
+          const atbatIds = new Set(
+            eventsRef.current.filter((ev) => ev.play_id === cancelled && ev.atbat_id).map((ev) => ev.atbat_id)
+          );
+          atbatsRef.current = atbatsRef.current.filter((a) => !atbatIds.has(a.id));
+          eventsRef.current = eventsRef.current.filter((ev) => ev.play_id !== cancelled);
+        } else {
+          const atbat = e.data.atbat as Atbat | undefined;
+          const created = (e.data.runner_events ?? []) as RunnerEvent[];
+          if (atbat && !atbatsRef.current.some((a) => a.id === atbat.id)) {
+            atbatsRef.current = [...atbatsRef.current, atbat];
+          }
+          const known = new Set(eventsRef.current.map((ev) => ev.id));
+          eventsRef.current = [...eventsRef.current, ...created.filter((ev) => !known.has(ev.id))];
+          if (typeof e.data.warning === 'string') setError(e.data.warning);
+        }
+        setAtbats(atbatsRef.current);
+        setRunnerEvents(eventsRef.current);
+      }),
     [gameId]
   );
 
@@ -173,6 +285,11 @@ export default function GamePage() {
     }
   }, [canEdit]);
 
+  const { atbats, events: runnerEvents } = mergePending(serverAtbats, serverEvents, pending) as {
+    atbats: Atbat[];
+    events: RunnerEvent[];
+  };
+  const blockedItem = pending[0]?.error ? pending[0] : null;
   const currentSlot = lineup.find((l) => l.batting_order === slot);
   const bases = computeBases(runnerEvents, inning);
   const hasRunners = bases.some(Boolean);
@@ -213,81 +330,160 @@ export default function GamePage() {
     }
   };
 
-  const saveAtbat = async (moves: RunnerMove[], rbi: number) => {
-    if (!currentSlot || !draft.result) return;
+  // 每筆紀錄先排進這支手機的佇列再依序送出：
+  //   - 有網路且沒有排隊中的紀錄：等伺服器結果，被拒絕就移除並在對話框顯示原因（和以前一樣）
+  //   - 離線、網路中斷、或前面還有沒同步的紀錄：留在佇列，畫面先更新，連線後自動依序上傳
+  // 回傳 false 表示伺服器拒絕，對話框保持開啟
+  const submit = async (item: QueueItem): Promise<boolean> => {
     setSaving(true);
     setError('');
     try {
-      const res = await fetch('/api/atbats/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          game_id: gameId,
-          player_id: currentSlot.player_id,
-          batting_order: slot,
-          inning,
-          result: draft.result,
-          quality: draft.quality,
-          rbi,
-          hit_x: draft.hitX,
-          hit_y: draft.hitY,
-          note: draft.note,
-          runners: moves.map((m) => ({ player_id: m.playerId, from_base: m.from, to_base: m.to })),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
-      // 直接接上新打席與跑壘並推進打者，不用整場重抓；以最新 state 計算，避免過期閉包
-      const created = data.atbat as Atbat;
-      const createdEvents = (data.runner_events ?? []) as RunnerEvent[];
-      const nextAtbats = [...atbatsRef.current, created];
-      const nextEvents = [...eventsRef.current, ...createdEvents];
-      atbatsRef.current = nextAtbats;
-      eventsRef.current = nextEvents;
-      setAtbats((prev) => [...prev, created]);
-      setRunnerEvents((prev) => [...prev, ...createdEvents]);
-      const next = nextState(nextAtbats, nextEvents, lineupRef.current);
-      setSlot(next.slot);
-      setInning(next.inning);
-      setDraft(EMPTY_DRAFT);
-      setRunnersDialog(null);
-      if (data.warning) setError(data.warning);
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    } catch (err) {
-      setError(err instanceof Error && err.message ? err.message : '儲存失敗');
+      const storage = queueStorage();
+      const direct = readQueue(storage, gameId).length === 0 && isOnline();
+      addToQueue(item);
+      if (!direct) {
+        void runSync(gameId);
+        return true;
+      }
+      const result = await runSync(gameId);
+      const stillQueued = readQueue(storage, gameId).some((i) => i.clientId === item.clientId);
+      if (!stillQueued || result.status === 'offline' || result.status === 'busy') return true;
+      removeItem(storage, gameId, item.clientId);
+      resetStatus(gameId);
+      notifyChange(gameId);
+      setError('error' in result ? result.error : '儲存失敗');
+      return false;
     } finally {
       setSaving(false);
     }
   };
 
+  const saveAtbat = async (moves: RunnerMove[], rbi: number) => {
+    if (!currentSlot || !draft.result) return;
+    const item = buildAtbatItem({
+      gameId,
+      playerId: currentSlot.player_id,
+      player: currentSlot.players,
+      battingOrder: slot,
+      inning,
+      result: draft.result,
+      quality: draft.quality,
+      rbi,
+      hitX: draft.hitX,
+      hitY: draft.hitY,
+      note: draft.note,
+      moves,
+      label: '',
+    });
+    item.label = describeAtbat(item.preview.atbat, item.preview.events);
+    if (!(await submit(item))) return;
+    // 以最新的伺服器資料 + 佇列推進打者，避免過期閉包
+    const merged = mergedNow();
+    const next = nextState(merged.atbats, merged.events, lineupRef.current);
+    setSlot(next.slot);
+    setInning(next.inning);
+    setDraft(EMPTY_DRAFT);
+    setRunnersDialog(null);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   const saveStandalone = async (type: RunnerEventType, moves: RunnerMove[]) => {
-    setSaving(true);
+    const item = buildPlayItem({ gameId, inning, type, moves, label: '' });
+    item.label = describePlay(item.preview.events);
+    if (!(await submit(item))) return;
+    // 牽制等跑壘事件造成第三個出局就換局（打者不變）
+    const merged = mergedNow();
+    setInning(nextState(merged.atbats, merged.events, lineupRef.current).inning);
+    setStandaloneKey(null);
+  };
+
+  // 撤銷上一步：
+  //   還有沒同步的紀錄 → 撤銷這支手機上最後一筆（不用網路）
+  //   否則先重新載入，以伺服器上真正最後一筆為準（可能是其他手機記的），確認後請伺服器刪除
+  const undoLast = async () => {
+    if (undoing || saving) return;
     setError('');
+    const storage = queueStorage();
+    const queue = readQueue(storage, gameId);
+    if (queue.length > 0) {
+      const target = [...queue].reverse().find((i) => i.kind !== 'cancel');
+      if (!target) {
+        setError('還有撤銷動作等待上傳，請連上網路同步完成後再撤銷');
+        return;
+      }
+      if (!window.confirm(`撤銷上一步（尚未同步）：\n${target.label}\n\n壘包、出局數與比分會回到這筆之前的狀態。`)) return;
+      const result = undoLatestPending(storage, gameId);
+      resetStatus(gameId);
+      notifyChange(gameId);
+      if (result.kind === 'cancelQueued') void runSync(gameId);
+      const merged = mergedNow();
+      const next = nextState(merged.atbats, merged.events, lineupRef.current);
+      if (target.kind === 'atbat') setSlot(next.slot);
+      setInning(next.inning);
+      return;
+    }
+    if (!isOnline()) {
+      setError('目前離線，只能撤銷尚未同步的紀錄；伺服器上的紀錄請連線後再撤銷');
+      return;
+    }
+    setUndoing(true);
     try {
-      const res = await fetch('/api/runner-events/create', {
+      const before = latestAction(atbatsRef.current, eventsRef.current);
+      const data = await load(false);
+      if (!data) return;
+      const target = latestAction(data.atbats, data.runner_events);
+      if (!target) {
+        setError('沒有可撤銷的紀錄');
+        return;
+      }
+      const other = sameTarget(before, target) ? '' : '\n（這筆是其他裝置剛記錄的，畫面已更新）';
+      const desc = describeTarget(target, data.atbats, data.runner_events);
+      if (!window.confirm(`撤銷上一步：\n${desc}${other}\n\n壘包、出局數與比分會回到這筆之前的狀態。`)) return;
+      const request = target.kind === 'atbat' ? { kind: 'atbat', id: target.id } : { kind: 'play', play_id: target.play_id };
+      const res = await fetch('/api/games/undo', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          game_id: gameId,
-          inning,
-          event_type: type,
-          runners: moves.map((m) => ({ player_id: m.playerId, from_base: m.from, to_base: m.to })),
-        }),
+        body: JSON.stringify({ game_id: gameId, target: request }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
-      const created = (data.runner_events ?? []) as RunnerEvent[];
-      const nextEvents = [...eventsRef.current, ...created];
-      eventsRef.current = nextEvents;
-      setRunnerEvents((prev) => [...prev, ...created]);
-      // 牽制等跑壘事件造成第三個出局就換局（打者不變）
-      setInning(nextState(atbatsRef.current, nextEvents, lineupRef.current).inning);
-      setStandaloneKey(null);
-    } catch (err) {
-      setError(err instanceof Error && err.message ? err.message : '儲存失敗');
+      const result = await res.json().catch(() => ({}));
+      const fresh = await load(false);
+      if (!res.ok) {
+        setError(result.error || '撤銷失敗');
+        return;
+      }
+      if (fresh) {
+        const next = nextState(fresh.atbats, fresh.runner_events, fresh.lineup);
+        if (target.kind === 'atbat') setSlot(next.slot);
+        setInning(next.inning);
+      }
+    } catch {
+      setError('撤銷失敗，請檢查網路後再試');
     } finally {
-      setSaving(false);
+      setUndoing(false);
     }
+  };
+
+  // 同步被伺服器拒絕：重試或捨棄這筆
+  const retryBlocked = () => {
+    setError('');
+    clearBlock(queueStorage(), gameId);
+    notifyChange(gameId);
+    void runSync(gameId);
+  };
+
+  const discardBlocked = async () => {
+    if (!blockedItem) return;
+    if (!window.confirm(`捨棄這筆尚未同步的紀錄？\n${blockedItem.label}\n\n捨棄後無法復原，需要的話請重新記錄。`)) return;
+    removeItem(queueStorage(), gameId, blockedItem.clientId);
+    resetStatus(gameId);
+    notifyChange(gameId);
+    // 通常是其他裝置也記錄過，先載入伺服器最新資料，再繼續同步後面的紀錄
+    await load(false);
+    const merged = mergedNow();
+    const next = nextState(merged.atbats, merged.events, lineupRef.current);
+    setSlot(next.slot);
+    setInning(next.inning);
+    void runSync(gameId);
   };
 
   const deleteAtbat = async (atbat: Atbat) => {
@@ -491,6 +687,48 @@ export default function GamePage() {
 
       {error && <div className="text-sm text-red-600 bg-red-50 p-3 rounded-md">{error}</div>}
 
+      {/* 離線紀錄：還沒上傳到伺服器的筆數與同步狀態 */}
+      {blockedItem ? (
+        <div className="space-y-2 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+          <div className="font-semibold">同步已暫停：有 {pending.length} 筆紀錄還沒上傳</div>
+          <div>
+            「{blockedItem.label}」被伺服器拒絕：{blockedItem.error}
+          </div>
+          <div className="text-xs text-red-700">
+            {pending.length > 1 ? `後面還有 ${pending.length - 1} 筆在等待，這筆處理好之前不會上傳。` : ''}
+            常見原因是其他裝置在這段時間也記錄了這場比賽。可以「捨棄這筆」後依最新畫面重新記錄，或稍後按「重試」。
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="outline" className="h-10 bg-white" onClick={retryBlocked}>重試</Button>
+            <Button size="sm" variant="destructive" className="h-10" onClick={discardBlocked}>捨棄這筆</Button>
+          </div>
+        </div>
+      ) : (
+        pending.length > 0 && (
+          <div className="flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+            <div className="min-w-0 flex-1">
+              <div className="font-semibold">有 {pending.length} 筆紀錄只存在這支手機，尚未同步</div>
+              <div className="text-xs">
+                {'state' in syncStatus && syncStatus.state === 'syncing'
+                  ? '正在上傳…'
+                  : 'status' in syncStatus && syncStatus.status === 'retry'
+                    ? `暫時無法上傳：${syncStatus.error}；稍後會自動重試`
+                    : '恢復連線後會自動依序上傳，請先不要清除瀏覽器資料'}
+              </div>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-10 shrink-0 bg-white"
+              disabled={'state' in syncStatus && syncStatus.state === 'syncing'}
+              onClick={() => void runSync(gameId)}
+            >
+              立即同步
+            </Button>
+          </div>
+        )
+      )}
+
       {/* 壘包 + 記分板 */}
       <Card className="gap-3">
         <CardContent className="space-y-3">
@@ -509,18 +747,28 @@ export default function GamePage() {
                   <span className="text-lg font-bold">{inning} 局</span>
                 )}
                 {recording && (
-                  <Button
-                    variant="outline"
-                    className="h-11"
-                    disabled={!hasRunners || saving}
-                    onClick={() => {
-                      setError('');
-                      dialogSeq.current += 1;
-                      setStandaloneKey(dialogSeq.current);
-                    }}
-                  >
-                    跑壘事件…
-                  </Button>
+                  <div className="flex gap-2">
+                    <Button
+                      variant="outline"
+                      className="h-11"
+                      disabled={!hasRunners || saving || undoing}
+                      onClick={() => {
+                        setError('');
+                        dialogSeq.current += 1;
+                        setStandaloneKey(dialogSeq.current);
+                      }}
+                    >
+                      跑壘事件…
+                    </Button>
+                    <Button
+                      variant="outline"
+                      className="h-11"
+                      disabled={saving || undoing || (atbats.length === 0 && runnerEvents.length === 0)}
+                      onClick={undoLast}
+                    >
+                      {undoing ? '撤銷中…' : '撤銷上一步'}
+                    </Button>
+                  </div>
                 )}
               </div>
             </div>
@@ -669,15 +917,19 @@ export default function GamePage() {
                 {byInning.get(inn)!.map((item) => {
                   if (item.kind === 'play') {
                     const label = standaloneLabel(item.events[0].event_type);
+                    const unsynced = isPendingId(item.events[0].id);
                     return (
                       <li key={item.playId} className="flex items-center gap-2 pl-3 pr-1 py-1.5 text-sm bg-gray-50">
                         <span className="w-4 shrink-0 text-gray-400">·</span>
                         <span className="min-w-0 flex-1">
-                          <span className="block font-semibold">{label}</span>
+                          <span className="block font-semibold">
+                            {label}
+                            {unsynced && <PendingTag />}
+                          </span>
                           <span className="block text-xs text-gray-600">{item.events.map(describeMove).join('、')}</span>
                         </span>
-                        {canEdit && (
-                          <Button variant="ghost" size="sm" className="px-2 text-red-600" disabled={deletingId !== null} onClick={() => deletePlay(item.playId, label)}>
+                        {canEdit && !unsynced && (
+                          <Button variant="ghost" size="sm" className="px-2 text-red-600" disabled={deletingId !== null || pending.length > 0} onClick={() => deletePlay(item.playId, label)}>
                             {deletingId === item.playId ? '刪除中' : '刪除'}
                           </Button>
                         )}
@@ -687,6 +939,7 @@ export default function GamePage() {
                   const a = item.atbat;
                   const option = getResultOption(fieldsToResult(a));
                   const runnerMoves = (eventsByAtbat.get(a.id) ?? []).filter((e) => e.from_base > 0);
+                  const unsynced = isPendingId(a.id);
                   return (
                     <li key={a.id} className="flex items-center gap-2 pl-3 pr-1 py-1.5 text-sm">
                       <span className="w-4 shrink-0 text-gray-400">{a.batting_order ?? ''}</span>
@@ -695,17 +948,19 @@ export default function GamePage() {
                         <span className="block text-xs">
                           <span className="font-semibold">{option?.label ?? '-'}</span>
                           {a.rbi > 0 && <span className="text-red-600 ml-1">{a.rbi} 打點</span>}
+                          {unsynced && <PendingTag />}
                         </span>
                         {runnerMoves.length > 0 && (
                           <span className="block text-xs text-gray-600">{runnerMoves.map(describeMove).join('、')}</span>
                         )}
                       </span>
-                      {canEdit && (
+                      {canEdit && !unsynced && (
                         <>
                           <Link href={`/record/${a.player_id}/edit/${a.id}`}>
                             <Button variant="ghost" size="sm" className="px-2">編輯</Button>
                           </Link>
-                          <Button variant="ghost" size="sm" className="px-2 text-red-600" disabled={deletingId !== null} onClick={() => deleteAtbat(a)}>
+                          {/* 還有沒同步的紀錄時先不刪伺服器上的舊紀錄，否則排隊中的紀錄會和壘包對不上 */}
+                          <Button variant="ghost" size="sm" className="px-2 text-red-600" disabled={deletingId !== null || pending.length > 0} onClick={() => deleteAtbat(a)}>
                             {deletingId === a.id ? '刪除中' : '刪除'}
                           </Button>
                         </>

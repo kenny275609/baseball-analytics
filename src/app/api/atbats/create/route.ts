@@ -4,6 +4,7 @@ import { authorize } from '@/lib/auth';
 import { parseAtbatInput } from '@/lib/atbat';
 import { isUuid, movedRunners, parseAllRunnerInputs, sacrificeFlyError } from '@/lib/baserunning';
 import { checkRunnersInDb } from '@/lib/basesServer';
+import { findExistingPlay, isUniqueViolation, parseClientId } from '@/lib/idempotency';
 import { isMissingTable, syncGameScore } from '@/lib/score';
 
 export async function POST(request: Request) {
@@ -15,6 +16,25 @@ export async function POST(request: Request) {
     const body = await request.json();
     if (!isUuid(body.player_id) || !isUuid(body.game_id)) {
       return NextResponse.json({ error: '缺少球員或比賽' }, { status: 400 });
+    }
+
+    // 離線同步重送：同一個 client_id 已經寫過就直接回傳原本的打席，不重複記錄
+    // （要在驗證壘上跑者之前查，第一次寫入後壘包已經變了）
+    const clientId = parseClientId(body.client_id);
+    if (clientId === false) {
+      return NextResponse.json({ error: 'client_id 格式錯誤' }, { status: 400 });
+    }
+    if (clientId) {
+      const existing = await findExistingPlay(supabase, body.game_id, clientId);
+      if (existing.kind === 'atbat') {
+        return NextResponse.json(
+          { atbat: existing.atbat, runner_events: existing.events, duplicate: true },
+          { status: 200 }
+        );
+      }
+      if (existing.kind === 'play') {
+        return NextResponse.json({ error: '這筆紀錄的識別碼已被其他跑壘事件使用' }, { status: 409 });
+      }
     }
 
     const parsed = parseAtbatInput(body);
@@ -64,7 +84,7 @@ export async function POST(request: Request) {
     let runnerEvents: unknown[] = [];
     let warning: string | undefined;
     if (runners.length > 0) {
-      const playId = crypto.randomUUID();
+      const playId = clientId ?? crypto.randomUUID();
       const { data, error: eventsError } = await supabase
         .from('runner_events')
         .insert(
@@ -86,8 +106,10 @@ export async function POST(request: Request) {
           // migration 尚未執行：打席照存，只是沒有跑壘資料
           warning = '跑壘資料表尚未建立，這次只記錄打席';
         } else {
-          // 沒有交易可用，手動把剛建立的打席撤回，避免打席和跑壘不一致
-          console.error('Error creating runner events:', eventsError);
+          // 沒有交易可用，手動把剛建立的打席撤回，避免打席和跑壘不一致；
+          // unique index 擋下的重複（兩個重送請求同時到）撤回後回傳先寫入的那一筆
+          const duplicate = clientId !== null && isUniqueViolation(eventsError);
+          if (!duplicate) console.error('Error creating runner events:', eventsError);
           const { data: removed, error: rollbackError } = await supabase
             .from('atbats')
             .delete()
@@ -100,6 +122,15 @@ export async function POST(request: Request) {
               { error: '跑壘資料儲存失敗，且打席未能撤回；請重新整理後刪除這筆打席再重記' },
               { status: 500 }
             );
+          }
+          if (duplicate && clientId) {
+            const existing = await findExistingPlay(supabase, body.game_id, clientId);
+            if (existing.kind === 'atbat') {
+              return NextResponse.json(
+                { atbat: existing.atbat, runner_events: existing.events, duplicate: true },
+                { status: 200 }
+              );
+            }
           }
           return NextResponse.json({ error: '跑壘資料儲存失敗，打席未記錄，請再試一次' }, { status: 500 });
         }

@@ -13,6 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 import { Navbar } from '@/components/Navbar';
+import { OfflineSyncer } from '@/components/OfflineSyncer';
 import { SessionProvider } from '@/lib/useSession';
 
 export const metadata: Metadata = {
@@ -54,6 +55,7 @@ export default function RootLayout({
       >
         <SessionProvider>
           <Navbar />
+          <OfflineSyncer />
           {children}
         </SessionProvider>
       </body>
