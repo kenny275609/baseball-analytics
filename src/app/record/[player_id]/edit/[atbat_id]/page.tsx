@@ -28,21 +28,32 @@ export default function EditAtbatPage() {
   const [atbat, setAtbat] = useState<AtbatData | null>(null);
   const [draft, setDraft] = useState<AtbatDraft>(EMPTY_DRAFT);
   const [inning, setInning] = useState<number | null>(null);
-  const [loading, setLoading] = useState(true);
+  // 已載入的打席 id；和網址不符就是載入中，換打席時不會顯示或送出上一筆
+  const [loadedId, setLoadedId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const loading = loadedId !== atbatId;
 
   useEffect(() => {
     if (!sessionLoading && user && !canEdit) router.push('/');
   }, [sessionLoading, user, canEdit, router]);
 
   useEffect(() => {
-    fetch(`/api/atbats/${atbatId}`)
-      .then((res) => res.json())
+    const controller = new AbortController();
+    const { signal } = controller;
+
+    fetch(`/api/atbats/${atbatId}`, { signal })
+      .then(async (res) => {
+        if (res.status === 404) return null;
+        if (!res.ok) throw new Error(`fetch atbat failed: ${res.status}`);
+        return res.json();
+      })
       .then((data) => {
-        const found: AtbatData | undefined = data.atbat;
-        if (!found) return;
+        const found: AtbatData | null = data?.atbat ?? null;
+        setLoadedId(atbatId);
         setAtbat(found);
+        setError('');
+        if (!found) return;
         setInning(found.inning);
         setDraft({
           result: fieldsToResult(found),
@@ -53,11 +64,19 @@ export default function EditAtbatPage() {
           note: found.note ?? '',
         });
       })
-      .finally(() => setLoading(false));
+      .catch((err) => {
+        if (signal.aborted) return;
+        console.error('Error fetching atbat:', err);
+        setLoadedId(atbatId);
+        setAtbat(null);
+        setError('載入失敗，請稍後再試');
+      });
+
+    return () => controller.abort();
   }, [atbatId]);
 
   const handleSubmit = async () => {
-    if (!atbat || !draft.result) return;
+    if (loading || !atbat || !draft.result) return;
     setSubmitting(true);
     setError('');
     try {
@@ -88,7 +107,7 @@ export default function EditAtbatPage() {
     return <div className="text-center py-12">載入中...</div>;
   }
   if (!atbat) {
-    return <div className="text-center py-12 text-gray-500">找不到這筆打席</div>;
+    return <div className={`text-center py-12 ${error ? 'text-red-600' : 'text-gray-500'}`}>{error || '找不到這筆打席'}</div>;
   }
 
   return (

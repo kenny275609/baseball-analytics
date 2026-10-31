@@ -43,22 +43,42 @@ export default function PlayerPage() {
   const params = useParams();
   const playerId = params.id as string;
   const { canEdit } = useSession();
-  const [atbats, setAtbats] = useState<Atbat[]>([]);
-  const [playerName, setPlayerName] = useState('球員');
-  const [loading, setLoading] = useState(true);
+  // 抓回來的資料都標上 playerId；和目前網址不符就視為載入中，換球員時不會殘留上一位的資料
+  const [atbatsData, setAtbatsData] = useState<{ playerId: string; atbats: Atbat[]; error: string } | null>(null);
+  const [nameData, setNameData] = useState<{ playerId: string; name: string } | null>(null);
   const [viewPoint, setViewPoint] = useState<FieldPoint | null>(null);
 
+  const loading = atbatsData?.playerId !== playerId;
+  const atbats = loading ? [] : atbatsData.atbats;
+  const error = loading ? '' : atbatsData.error;
+  const playerName = nameData?.playerId === playerId ? nameData.name : '球員';
+
   useEffect(() => {
-    fetch(`/api/atbats/list?player=${playerId}`)
-      .then((res) => res.json())
-      .then((data) => setAtbats(data.atbats || []))
-      .finally(() => setLoading(false));
-    fetch(`/api/players/${playerId}`)
-      .then((res) => res.json())
+    const controller = new AbortController();
+    const { signal } = controller;
+    const getJson = async (url: string) => {
+      const res = await fetch(url, { signal });
+      if (!res.ok) throw new Error(`${url} failed: ${res.status}`);
+      return res.json();
+    };
+
+    getJson(`/api/atbats/list?player=${playerId}`)
+      .then((data) => setAtbatsData({ playerId, atbats: data.atbats || [], error: '' }))
+      .catch((err) => {
+        if (signal.aborted) return;
+        console.error('Error fetching atbats:', err);
+        setAtbatsData({ playerId, atbats: [], error: '打席紀錄載入失敗' });
+      });
+    getJson(`/api/players/${playerId}`)
       .then((data) => {
         const p = data.player;
-        if (p) setPlayerName(p.number ? `#${p.number} ${p.name}` : p.name);
+        if (p) setNameData({ playerId, name: p.number ? `#${p.number} ${p.name}` : p.name });
+      })
+      .catch((err) => {
+        if (!signal.aborted) console.error('Error fetching player:', err);
       });
+
+    return () => controller.abort();
   }, [playerId]);
 
   const stats = computeStats(atbats);
@@ -82,6 +102,8 @@ export default function PlayerPage() {
 
       {loading ? (
         <div className="text-center py-12">載入中...</div>
+      ) : error ? (
+        <div className="text-sm text-red-600 bg-red-50 p-3 rounded-md">{error}</div>
       ) : atbats.length === 0 ? (
         <Card>
           <CardContent className="py-12 text-center text-gray-500">

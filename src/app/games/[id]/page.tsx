@@ -97,7 +97,15 @@ export default function GamePage() {
   const [subbing, setSubbing] = useState(false);
   const [ourScore, setOurScore] = useState('');
   const [oppScore, setOppScore] = useState('');
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const lineupStripRef = useRef<HTMLDivElement>(null);
+  // 非同步操作完成時拿最新的打席/打序，而不是點擊當下閉包裡的舊值
+  const atbatsRef = useRef<Atbat[]>([]);
+  const lineupRef = useRef<LineupSlot[]>([]);
+  useEffect(() => {
+    atbatsRef.current = atbats;
+    lineupRef.current = lineup;
+  }, [atbats, lineup]);
 
   const load = useCallback(
     async (advance: boolean) => {
@@ -173,10 +181,12 @@ export default function GamePage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
-      // 直接接上新打席並推進打者，不用整場重抓
-      const nextAtbats = [...atbats, data.atbat as Atbat];
-      setAtbats(nextAtbats);
-      const next = nextState(nextAtbats, lineup);
+      // 直接接上新打席並推進打者，不用整場重抓；以最新 state 計算，避免過期閉包
+      const created = data.atbat as Atbat;
+      const nextAtbats = [...atbatsRef.current, created];
+      atbatsRef.current = nextAtbats;
+      setAtbats((prev) => [...prev, created]);
+      const next = nextState(nextAtbats, lineupRef.current);
       setSlot(next.slot);
       setInning(next.inning);
       setDraft(EMPTY_DRAFT);
@@ -190,22 +200,34 @@ export default function GamePage() {
 
   const deleteAtbat = async (atbat: Atbat) => {
     const label = getResultOption(fieldsToResult(atbat))?.label ?? '';
+    if (deletingId) return;
     if (!window.confirm(`刪除 ${atbat.players?.name ?? ''} 的「${label}」？`)) return;
-    const res = await fetch('/api/atbats/delete', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: atbat.id }),
-    });
-    if (!res.ok) {
+    setDeletingId(atbat.id);
+    setError('');
+    try {
+      const res = await fetch('/api/atbats/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: atbat.id }),
+      });
+      if (!res.ok) throw new Error();
+      const current = atbatsRef.current;
+      const isLast = current[current.length - 1]?.id === atbat.id;
+      const remaining = current.filter((a) => a.id !== atbat.id);
+      atbatsRef.current = remaining;
+      setAtbats((prev) => prev.filter((a) => a.id !== atbat.id));
+      if (isLast) {
+        // 刪掉最後一筆＝復原，打者和局數跟著退回
+        if (atbat.batting_order) setSlot(atbat.batting_order);
+        if (atbat.inning) setInning(atbat.inning);
+      } else {
+        // 刪中間的打席可能讓某局不滿 3 出局，局數要重算
+        setInning(nextState(remaining, lineupRef.current).inning);
+      }
+    } catch {
       setError('刪除失敗');
-      return;
-    }
-    // 刪掉最後一筆＝復原，打者和局數跟著退回
-    const isLast = atbats[atbats.length - 1]?.id === atbat.id;
-    setAtbats((prev) => prev.filter((a) => a.id !== atbat.id));
-    if (isLast) {
-      if (atbat.batting_order) setSlot(atbat.batting_order);
-      if (atbat.inning) setInning(atbat.inning);
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -330,7 +352,7 @@ export default function GamePage() {
               {subbing ? (
                 <select
                   autoFocus
-                  className="border rounded-md px-2 py-1 text-sm"
+                  className="border rounded-md px-2 py-1 text-base md:text-sm"
                   defaultValue=""
                   onChange={(e) => substitute(e.target.value)}
                   onBlur={() => setSubbing(false)}
@@ -392,7 +414,9 @@ export default function GamePage() {
                           <Link href={`/record/${a.player_id}/edit/${a.id}`}>
                             <Button variant="ghost" size="sm" className="px-2">編輯</Button>
                           </Link>
-                          <Button variant="ghost" size="sm" className="px-2 text-red-600" onClick={() => deleteAtbat(a)}>刪除</Button>
+                          <Button variant="ghost" size="sm" className="px-2 text-red-600" disabled={deletingId !== null} onClick={() => deleteAtbat(a)}>
+                            {deletingId === a.id ? '刪除中' : '刪除'}
+                          </Button>
                         </>
                       )}
                     </li>

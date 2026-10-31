@@ -16,7 +16,8 @@ export async function GET(_request: Request, ctx: RouteContext<'/api/atbats/[id]
       .single();
 
     if (error) {
-      if (error.code === 'PGRST116') {
+      // PGRST116：查無資料；22P02：id 不是合法 UUID
+      if (error.code === 'PGRST116' || error.code === '22P02') {
         return NextResponse.json({ error: '找不到這筆打席' }, { status: 404 });
       }
       throw error;
