@@ -15,7 +15,7 @@ interface Game {
   status: 'live' | 'final';
   our_score: number | null;
   opp_score: number | null;
-  atbats: { count: number }[];
+  pa_count: number;
 }
 
 export default function GamesPage() {
@@ -83,7 +83,7 @@ export default function GamesPage() {
                     ) : (
                       <Badge variant="outline">已結束</Badge>
                     )}
-                    <div className="text-xs text-gray-500 mt-1">{g.atbats[0]?.count ?? 0} 個打席</div>
+                    <div className="text-xs text-gray-500 mt-1">{g.pa_count ?? 0} 個打席</div>
                   </div>
                 </CardContent>
               </Card>

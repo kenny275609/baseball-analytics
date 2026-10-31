@@ -1,11 +1,56 @@
 import { describe, expect, it } from 'vitest';
-import { RESULT_OPTIONS, countOuts, fieldsToResult, parseAtbatInput, resultToFields } from '@/lib/atbat';
+import {
+  QUICK_RESULTS,
+  RESULT_OPTIONS,
+  ResultCode,
+  computeStats,
+  countOuts,
+  countPlateAppearances,
+  fieldsToResult,
+  getResultOption,
+  parseAtbatInput,
+  resultToFields,
+} from '@/lib/atbat';
 
 describe('resultToFields / fieldsToResult', () => {
   it('每個結果都能來回轉換', () => {
     for (const o of RESULT_OPTIONS) {
       expect(fieldsToResult(resultToFields(o.code))).toBe(o.code);
     }
+  });
+});
+
+describe('犧牲觸擊 / 高飛犧牲打', () => {
+  it('舊資料的 sacrifice 仍可讀取，顯示為犧牲觸擊；高飛犧牲打另存 sacrifice_fly', () => {
+    const legacy = { contacted: true, no_contact: null, result: 'sacrifice', out_type: null };
+    expect(fieldsToResult(legacy)).toBe('sacrifice');
+    expect(getResultOption('sacrifice')?.label).toBe('犧牲觸擊');
+    expect(resultToFields('sacrifice_fly')).toEqual({ contacted: true, no_contact: null, result: 'sacrifice_fly', out_type: null });
+    expect(getResultOption('sacrifice_fly')).toMatchObject({ label: '高飛犧牲打', outs: 1 });
+    expect(QUICK_RESULTS.map((o) => o.code)).toEqual(expect.arrayContaining(['sacrifice', 'sacrifice_fly']));
+    expect(parseAtbatInput({ result: 'sacrifice_fly', rbi: 1 }).row).toMatchObject({ result: 'sacrifice_fly', rbi: 1 });
+  });
+
+  it('兩者都不算打數；高飛犧牲打算進上壘率分母、犧牲觸擊不算', () => {
+    const rows = (codes: ResultCode[]) => codes.map((c) => ({ ...resultToFields(c), rbi: 0 }));
+    const sh = computeStats(rows(['single', 'strikeout', 'sacrifice']));
+    expect(sh).toMatchObject({ pa: 3, ab: 2, sac: 1, sf: 0 });
+    expect(sh.obp).toBeCloseTo(1 / 2);
+
+    const sf = computeStats(rows(['single', 'strikeout', 'sacrifice_fly']));
+    expect(sf).toMatchObject({ pa: 3, ab: 2, sac: 1, sf: 1 });
+    expect(sf.avg).toBeCloseTo(1 / 2);
+    expect(sf.obp).toBeCloseTo(1 / 3);
+  });
+});
+
+describe('countPlateAppearances', () => {
+  it('只算有打擊結果的打席', () => {
+    const rows = (['single', 'walk', 'strikeout', 'sacrifice_fly', 'other'] as ResultCode[]).map(resultToFields);
+    expect(countPlateAppearances(rows)).toBe(5);
+    // 沒有結果的殘缺資料不算
+    expect(countPlateAppearances([...rows, { contacted: true, no_contact: null, result: null, out_type: null }])).toBe(5);
+    expect(countPlateAppearances([])).toBe(0);
   });
 });
 

@@ -19,6 +19,7 @@ export type ResultCode =
   | 'fielders_choice'
   | 'error'
   | 'sacrifice'
+  | 'sacrifice_fly'
   | 'other';
 
 export type ResultGroup = 'hit' | 'onbase' | 'out' | 'other';
@@ -46,7 +47,9 @@ export const RESULT_OPTIONS: ResultOption[] = [
   { code: 'flyout', label: '飛球接殺', short: 'FO', group: 'out', contacted: true, outs: 1 },
   { code: 'double_play', label: '雙殺', short: 'DP', group: 'out', contacted: true, outs: 2 },
   { code: 'triple_play', label: '三殺', short: 'TP', group: 'out', contacted: true, outs: 3 },
-  { code: 'sacrifice', label: '犧牲打', short: 'SAC', group: 'other', contacted: true, outs: 1 },
+  // 舊資料的「犧牲打」沿用 sacrifice，視為犧牲觸擊
+  { code: 'sacrifice', label: '犧牲觸擊', short: 'SH', group: 'other', contacted: true, outs: 1 },
+  { code: 'sacrifice_fly', label: '高飛犧牲打', short: 'SF', group: 'other', contacted: true, outs: 1 },
   { code: 'out', label: '出局（未分類）', short: 'OUT', group: 'out', contacted: true, outs: 1 },
   { code: 'other', label: '其他', short: '—', group: 'other', contacted: false, outs: 0 },
 ];
@@ -109,7 +112,8 @@ export interface BattingStats {
   bb: number;
   hbp: number;
   so: number;
-  sac: number;
+  sac: number; // 犧牲觸擊 + 高飛犧牲打
+  sf: number;
   rbi: number;
   tb: number;
   avg: number;
@@ -118,9 +122,9 @@ export interface BattingStats {
   ops: number;
 }
 
-// 打數 (AB) = 打席 − 保送 − 觸身 − 犧牲打 − 其他
+// 打數 (AB) = 打席 − 保送 − 觸身 − 犧牲觸擊 − 高飛犧牲打 − 其他
 // 三振、失誤、野選都算打數。
-// 系統沒有區分犧牲觸擊/犧牲飛球，因此上壘率分母不含犧牲打。
+// 上壘率分母 = 打數 + 保送 + 觸身 + 高飛犧牲打（犧牲觸擊不算）。
 export function computeStats(
   atbats: (AtbatResultFields & { rbi: number | null })[]
 ): BattingStats {
@@ -140,11 +144,12 @@ export function computeStats(
   const hr = n('homerun');
   const bb = n('walk');
   const hbp = n('hit_by_pitch');
-  const sac = n('sacrifice');
+  const sf = n('sacrifice_fly');
+  const sac = n('sacrifice') + sf;
   const h = b1 + b2 + b3 + hr;
   const ab = pa - bb - hbp - sac - n('other');
   const tb = b1 + 2 * b2 + 3 * b3 + 4 * hr;
-  const obpDenom = ab + bb + hbp;
+  const obpDenom = ab + bb + hbp + sf;
 
   const avg = ab > 0 ? h / ab : 0;
   const obp = obpDenom > 0 ? (h + bb + hbp) / obpDenom : 0;
@@ -153,7 +158,7 @@ export function computeStats(
   return {
     pa, ab, h, b1, b2, b3, hr, bb, hbp,
     so: n('strikeout'),
-    sac, rbi, tb, avg, obp, slg,
+    sac, sf, rbi, tb, avg, obp, slg,
     ops: obp + slg,
   };
 }
@@ -162,6 +167,11 @@ export function computeStats(
 export function formatRate(value: number): string {
   const s = value.toFixed(3);
   return s.startsWith('0') ? s.slice(1) : s;
+}
+
+// 打席數：只算有打擊結果的打席；盜壘、暴投等非打擊跑壘記在 runner_events，不算打席
+export function countPlateAppearances(atbats: AtbatResultFields[]): number {
+  return atbats.filter((a) => fieldsToResult(a) !== null).length;
 }
 
 export function countOuts(atbats: AtbatResultFields[]): number {

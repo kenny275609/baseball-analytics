@@ -2,7 +2,8 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { authorize } from '@/lib/auth';
 import { parseAtbatInput } from '@/lib/atbat';
-import { isUuid, parseRunnerInputs } from '@/lib/baserunning';
+import { isUuid, movedRunners, parseAllRunnerInputs } from '@/lib/baserunning';
+import { checkRunnersInDb } from '@/lib/basesServer';
 import { isMissingTable, syncGameScore } from '@/lib/score';
 
 export async function POST(request: Request) {
@@ -23,12 +24,22 @@ export async function POST(request: Request) {
     const row = parsed.row;
 
     // 同一請求可一起送這個打席造成的跑壘（含打者本身 from_base 0）
-    const runners = parseRunnerInputs(body.runners, true);
-    if (!runners) {
+    const allRunners = parseAllRunnerInputs(body.runners, true);
+    if (!allRunners) {
       return NextResponse.json({ error: '跑壘資料錯誤' }, { status: 400 });
     }
+    const runners = movedRunners(allRunners);
     if (runners.length > 0 && !row.inning) {
       return NextResponse.json({ error: '記錄跑壘需要局數' }, { status: 400 });
+    }
+    if (allRunners.length > 0 && row.inning) {
+      // 跑者必須真的在壘上（以資料庫事件為準，避免畫面過期或多裝置同時記錄造成錯亂）；
+      // 資料表不存在時下面的 insert 會改成只記錄打席
+      const check = await checkRunnersInDb(supabase, body.game_id, row.inning as number, allRunners);
+      if (check.kind === 'invalid') {
+        return NextResponse.json({ error: check.error }, { status: 400 });
+      }
+      if (check.kind === 'failed') throw check.error;
     }
 
     const { data: atbat, error } = await supabase

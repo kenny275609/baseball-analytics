@@ -45,7 +45,7 @@ export default function StatsPage() {
   ];
   const counts = [
     ['打席', s.pa], ['打數', s.ab], ['安打', s.h], ['二安', s.b2], ['三安', s.b3],
-    ['全壘打', s.hr], ['打點', s.rbi], ['保送', s.bb], ['觸身', s.hbp], ['三振', s.so], ['犧牲', s.sac],
+    ['全壘打', s.hr], ['打點', s.rbi], ['保送', s.bb], ['觸身', s.hbp], ['三振', s.so], ['犧牲觸擊', s.sac - s.sf], ['高飛犧牲', s.sf],
   ] as const;
 
   return (

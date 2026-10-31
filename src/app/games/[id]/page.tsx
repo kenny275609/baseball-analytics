@@ -17,6 +17,7 @@ import { useSession } from '@/lib/useSession';
 import {
   AtbatResultFields,
   computeStats,
+  countPlateAppearances,
   fieldsToResult,
   formatRate,
   getResultOption,
@@ -491,9 +492,10 @@ export default function GamePage() {
       <Card className="gap-3">
         <CardContent className="space-y-3">
           {game.status === 'live' && (
-            <div className="flex items-center justify-between gap-2">
+            // 窄螢幕（375px）放不下並排，局數與盜壘按鈕換到壘包下方一列
+            <div className="flex flex-wrap items-center justify-center sm:justify-between gap-x-2 gap-y-3">
               <BaseDiamond bases={bases} outs={Math.min(3, outsThisInning)} />
-              <div className="flex flex-col items-center gap-3">
+              <div className="flex basis-full sm:basis-auto flex-wrap sm:flex-col items-center justify-center gap-3">
                 {recording ? (
                   <div className="flex items-center gap-1">
                     <Button variant="outline" size="icon-sm" onClick={() => setInning(Math.max(1, inning - 1))} aria-label="上一局">◀</Button>
@@ -605,14 +607,16 @@ export default function GamePage() {
                 調整去向
               </Button>
             )}
-            <Button className="flex-1 h-12 text-base" onClick={() => startSave()} disabled={!draft.result || !currentSlot || saving}>
-              {saving
-                ? '儲存中...'
-                : draft.result
-                  ? hasRunners
-                    ? `下一步：跑者去向（${draftLabel}）`
-                    : `記錄：${currentSlot?.players?.name ?? ''} ${draftLabel}`
-                  : '請選擇打席結果'}
+            <Button className="flex-1 min-w-0 h-12 text-base" onClick={() => startSave()} disabled={!draft.result || !currentSlot || saving}>
+              <span className="truncate">
+                {saving
+                  ? '儲存中...'
+                  : draft.result
+                    ? hasRunners
+                      ? `下一步：跑者去向（${draftLabel}）`
+                      : `記錄：${currentSlot?.players?.name ?? ''} ${draftLabel}`
+                    : '請選擇打席結果'}
+              </span>
             </Button>
           </div>
         </div>
@@ -645,7 +649,7 @@ export default function GamePage() {
 
       {/* 打席紀錄 */}
       <Card className="gap-3">
-        <CardHeader><CardTitle>打席紀錄（{atbats.length}）</CardTitle></CardHeader>
+        <CardHeader><CardTitle>打席紀錄（{countPlateAppearances(atbats)}）</CardTitle></CardHeader>
         <CardContent className="space-y-3">
           {atbats.length === 0 && plays.size === 0 && <p className="text-sm text-gray-500">尚無打席</p>}
           {logInnings.map((inn) => (

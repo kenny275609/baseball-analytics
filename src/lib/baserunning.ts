@@ -64,8 +64,8 @@ export type Bases = [null, Runner | null, Runner | null, Runner | null];
 export const EMPTY_BASES: Bases = [null, null, null, null];
 
 // 依 play 分組，保持發生順序（API 回傳已依 created_at 排序）
-function groupByPlay(events: RunnerEvent[]): RunnerEvent[][] {
-  const groups = new Map<string, RunnerEvent[]>();
+function groupByPlay<T extends Pick<RunnerEvent, 'play_id'>>(events: T[]): T[][] {
+  const groups = new Map<string, T[]>();
   for (const e of events) {
     const g = groups.get(e.play_id);
     if (g) g.push(e);
@@ -74,7 +74,12 @@ function groupByPlay(events: RunnerEvent[]): RunnerEvent[][] {
   return [...groups.values()];
 }
 
-export function computeBases(events: RunnerEvent[], inning: number): Bases {
+export type BaseReplayEvent = Pick<
+  RunnerEvent,
+  'play_id' | 'inning' | 'runner_player_id' | 'from_base' | 'to_base' | 'players'
+>;
+
+export function computeBases(events: BaseReplayEvent[], inning: number): Bases {
   const bases: Bases = [null, null, null, null];
   for (const play of groupByPlay(events.filter((e) => e.inning === inning))) {
     // 先把所有跑者從原壘拿起來再放下，前後順序才不會互相覆蓋（一壘→二壘、二壘→三壘）
@@ -177,6 +182,9 @@ export function defaultMoves(
       case 'error':
       case 'sacrifice':
         return Math.min(4, b + 1);
+      case 'sacrifice_fly':
+        // 只有三壘跑者回本壘，其他跑者留在原壘
+        return b === 3 ? 4 : b;
       case 'double':
         return Math.min(4, b + 2);
       case 'triple':
@@ -250,17 +258,35 @@ export function movesOuts(moves: RunnerMove[]): number {
   return moves.filter((m) => m.to === null).length;
 }
 
-// 兩個打席之間的事件預設去向：暴投/捕逸/投手犯規所有跑者各推進一個壘，其他預設留在原壘
+// 兩個打席之間的事件預設去向（都可在對話框手動修改）：
+//   暴投/捕逸/投手犯規：最前面的跑者推進一個壘，後面的跑者依序跟著推進（＝所有跑者各推進一個壘）
+//   盜壘：最前面的跑者推進一個壘（前方一定沒人擋），其他留在原壘
+//   盜壘失敗/牽制出局：最前面的跑者出局
+//   其他：留在原壘，由使用者選
 export function standaloneDefaults(type: RunnerEventType, bases: Bases): RunnerMove[] {
-  const advanceAll = type === 'wild_pitch' || type === 'passed_ball' || type === 'balk';
-  return ([3, 2, 1] as const)
-    .filter((b) => bases[b])
-    .map((b) => ({
-      playerId: bases[b]!.playerId,
-      player: bases[b]!.player,
-      from: b,
-      to: advanceAll ? b + 1 : b,
-    }));
+  const occupied = ([3, 2, 1] as const).filter((b) => bases[b]);
+  const lead = occupied[0];
+  const to = (b: number): number | null => {
+    switch (type) {
+      case 'wild_pitch':
+      case 'passed_ball':
+      case 'balk':
+        return b + 1;
+      case 'steal':
+        return b === lead ? b + 1 : b;
+      case 'caught_stealing':
+      case 'pickoff':
+        return b === lead ? null : b;
+      default:
+        return b;
+    }
+  };
+  return occupied.map((b) => ({
+    playerId: bases[b]!.playerId,
+    player: bases[b]!.player,
+    from: b,
+    to: to(b),
+  }));
 }
 
 // 根據最後一個打席推算下一位打者，局數看最後一筆紀錄（打席或跑壘事件）：同局出局數滿 3 就換下一局
@@ -310,10 +336,9 @@ export function isUuid(value: unknown): value is string {
   return typeof value === 'string' && UUID_RE.test(value);
 }
 
-// 先用完整輸入（含停在原壘的跑者）檢查壘包衝突與超越，
-// 再只保留真正有移動的跑者（停在原壘不用記錄）；格式錯誤回傳 null。
+// 用完整輸入（含停在原壘的跑者）檢查壘包衝突與超越；格式錯誤回傳 null。
 // allowBatter（打席）時有送跑壘就必須包含打者，否則這個打席的打者出局/上壘會漏記
-export function parseRunnerInputs(value: unknown, allowBatter: boolean): RunnerEventInput[] | null {
+export function parseAllRunnerInputs(value: unknown, allowBatter: boolean): RunnerEventInput[] | null {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value) || value.length > 4) return null;
   const all: RunnerEventInput[] = [];
@@ -335,7 +360,31 @@ export function parseRunnerInputs(value: unknown, allowBatter: boolean): RunnerE
   }
   if (allowBatter && all.length > 0 && !fromSeen.has(0)) return null;
   if (validateMoves(all.map((r) => ({ from: r.from_base, to: r.to_base })))) return null;
+  return all;
+}
+
+// 只保留真正有移動的跑者（停在原壘不用記錄）
+export function movedRunners(all: RunnerEventInput[]): RunnerEventInput[] {
   return all.filter((r) => r.to_base !== r.from_base);
+}
+
+export function parseRunnerInputs(value: unknown, allowBatter: boolean): RunnerEventInput[] | null {
+  const all = parseAllRunnerInputs(value, allowBatter);
+  return all && movedRunners(all);
+}
+
+// 伺服器端：送來的跑者必須真的在壘上（bases 由資料庫裡該局事件重播），
+// 沒送到的壘上跑者視為留在原壘，一起檢查不能被超越或同壘兩人。回傳錯誤訊息；null 表示合法
+export function checkRunnersOnBases(all: RunnerEventInput[], bases: Bases): string | null {
+  for (const r of all) {
+    if (r.from_base === 0) continue;
+    const onBase = bases[r.from_base];
+    if (!onBase) return `${r.from_base} 壘目前沒有跑者，請重新整理後再記錄`;
+    if (onBase.playerId !== r.runner_player_id) return `${r.from_base} 壘跑者與紀錄不符，請重新整理後再記錄`;
+  }
+  const sent = new Set(all.map((r) => r.from_base));
+  const stays = ([1, 2, 3] as const).filter((b) => bases[b] && !sent.has(b)).map((b) => ({ from: b, to: b }));
+  return validateMoves([...all.map((r) => ({ from: r.from_base, to: r.to_base })), ...stays]);
 }
 
 export function isStandaloneType(value: unknown): value is RunnerEventType {

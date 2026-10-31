@@ -6,8 +6,10 @@ import {
   RunnerEvent,
   RunnerEventType,
   RunnerMove,
+  STANDALONE_EVENTS,
   autoRbi,
   batterEventPatch,
+  checkRunnersOnBases,
   computeBases,
   defaultMoves,
   isStandaloneType,
@@ -15,7 +17,9 @@ import {
   isUuid,
   movesOuts,
   nextTurn,
+  movedRunners,
   outsInInning,
+  parseAllRunnerInputs,
   parseRunnerInputs,
   runsByInning,
   standaloneDefaults,
@@ -94,11 +98,11 @@ class Sim {
     let moves = defaultMoves(code, this.bases(), runner(batterId), this.outs());
     if (adjust) moves = adjust(moves);
     expect(validateMoves(moves)).toBeNull();
-    const inputs = parseRunnerInputs(
-      moves.map((m) => ({ player_id: m.playerId, from_base: m.from, to_base: m.to })),
-      true
-    );
+    const raw = moves.map((m) => ({ player_id: m.playerId, from_base: m.from, to_base: m.to }));
+    const inputs = parseRunnerInputs(raw, true);
     expect(inputs).not.toBeNull();
+    // 伺服器端用重播的壘包再驗一次
+    expect(checkRunnersOnBases(parseAllRunnerInputs(raw, true)!, this.bases())).toBeNull();
     const id = `ab${++this.n}`;
     const play = `p${this.n}`;
     this.atbats.push({ id, inning: this.inning, batting_order: (this.atbats.length % 9) + 1, ...resultToFields(code) });
@@ -112,11 +116,10 @@ class Sim {
   standalone(type: RunnerEventType, adjust?: (m: RunnerMove[]) => RunnerMove[]) {
     let moves = standaloneDefaults(type, this.bases());
     if (adjust) moves = adjust(moves);
-    const inputs = parseRunnerInputs(
-      moves.map((m) => ({ player_id: m.playerId, from_base: m.from, to_base: m.to })),
-      false
-    );
+    const raw = moves.map((m) => ({ player_id: m.playerId, from_base: m.from, to_base: m.to }));
+    const inputs = parseRunnerInputs(raw, false);
     expect(inputs).not.toBeNull();
+    expect(checkRunnersOnBases(parseAllRunnerInputs(raw, false)!, this.bases())).toBeNull();
     const play = `s${++this.n}`;
     for (const r of inputs!) {
       this.events.push(ev(this.inning, play, r.runner_player_id, r.from_base, r.to_base, { event_type: type }));
@@ -266,14 +269,35 @@ describe('defaultMoves', () => {
     expect(movesOuts(moves)).toBe(3);
   });
 
-  it('高飛犧牲打：三壘跑者回來得分、打者出局，給打點', () => {
-    const moves = defaultMoves('sacrifice', bases(null, null, C), batter, 1);
-    expect(dest(moves)).toEqual({ 0: null, 3: 4 });
+  it('高飛犧牲打：只有三壘跑者回來得分，其他跑者留原壘、打者出局，打點 1', () => {
+    const moves = defaultMoves('sacrifice_fly', bases(A, B, C), batter, 1);
+    expect(dest(moves)).toEqual({ 0: null, 1: 1, 2: 2, 3: 4 });
+    expect(movesOuts(moves)).toBe(1);
+    expect(autoRbi('sacrifice_fly', moves)).toBe(1);
+    expect(dest(defaultMoves('sacrifice_fly', bases(null, null, C), batter))).toEqual({ 0: null, 3: 4 });
+  });
+
+  it('高飛犧牲打但三壘沒人：打者出局、跑者不動、沒有打點', () => {
+    const moves = defaultMoves('sacrifice_fly', bases(A, B, null), batter);
+    expect(dest(moves)).toEqual({ 0: null, 1: 1, 2: 2 });
+    expect(autoRbi('sacrifice_fly', moves)).toBe(0);
+  });
+
+  it('犧牲觸擊：跑者各推進一個壘、打者出局', () => {
+    expect(dest(defaultMoves('sacrifice', bases(A, null, null), batter))).toEqual({ 0: null, 1: 2 });
+    const moves = defaultMoves('sacrifice', bases(A, B, C), batter, 1);
+    expect(dest(moves)).toEqual({ 0: null, 1: 2, 2: 3, 3: 4 });
     expect(autoRbi('sacrifice', moves)).toBe(1);
   });
 
-  it('犧牲觸擊：跑者推進一個壘、打者出局', () => {
-    expect(dest(defaultMoves('sacrifice', bases(A, null, null), batter))).toEqual({ 0: null, 1: 2 });
+  it('一壘安打：維持所有跑者推進一個壘', () => {
+    expect(dest(defaultMoves('single', bases(A, B, null), batter))).toEqual({ 0: 1, 1: 2, 2: 3 });
+  });
+
+  it('失誤：預設打點 0，可手動改', () => {
+    const moves = defaultMoves('error', bases(null, null, C), batter);
+    expect(dest(moves)).toEqual({ 0: 1, 3: 4 });
+    expect(autoRbi('error', moves)).toBe(0);
   });
 
   it('三振／滾地／飛球出局：打者出局，跑者留在原壘', () => {
@@ -293,7 +317,7 @@ describe('defaultMoves', () => {
     ];
     const codes: ResultCode[] = [
       'single', 'double', 'triple', 'homerun', 'walk', 'hit_by_pitch', 'strikeout', 'groundout',
-      'flyout', 'out', 'double_play', 'triple_play', 'fielders_choice', 'error', 'sacrifice', 'other',
+      'flyout', 'out', 'double_play', 'triple_play', 'fielders_choice', 'error', 'sacrifice', 'sacrifice_fly', 'other',
     ];
     for (const b of allBases) for (const code of codes) for (const outs of [0, 1, 2]) {
       expect(validateMoves(defaultMoves(code, b, batter, outs)), `${code} ${ids(b)} ${outs}`).toBeNull();
@@ -314,6 +338,10 @@ describe('第三出局時的預設行為', () => {
 
   it('一出局雙殺結束這局：三壘跑者不得分', () => {
     expect(dest(defaultMoves('double_play', bases(A, null, C), batter, 1))).toEqual({ 0: null, 1: null, 3: 3 });
+  });
+
+  it('兩出局高飛犧牲打（實際是第三出局）：三壘跑者不預填得分', () => {
+    expect(dest(defaultMoves('sacrifice_fly', bases(null, null, C), batter, 2))).toEqual({ 0: null, 3: 3 });
   });
 
   it('還沒到三出局時照常推進', () => {
@@ -435,14 +463,36 @@ describe('出局數、換局與得分（模擬整局）', () => {
     g.atbat('walk', C);
     g.standalone('balk');
     expect(ids(g.bases())).toEqual([null, C, B]);
-    g.standalone('pickoff', set(2, null));
+    // 牽制預設最前面的三壘跑者出局，改成二壘跑者被牽制
+    g.standalone('pickoff', (m) => set(2, null)(set(3, 3)(m)));
     expect(ids(g.bases())).toEqual([null, null, B]);
     expect(g.outs()).toBe(1);
-    // 雙盜壘
+    // 雙盜壘：預設只有最前面的三壘跑者，手動加上一壘跑者
     g.atbat('walk', D);
-    g.standalone('steal', (m) => set(3, 4)(set(1, 2)(m)));
+    g.standalone('steal', set(1, 2));
     expect(ids(g.bases())).toEqual([null, D, null]);
     expect(runsByInning(g.events).get(1)).toBe(2);
+  });
+
+  it('高飛犧牲打 vs 犧牲觸擊（同樣一、三壘有人、一出局）', () => {
+    const fly = new Sim();
+    fly.atbat('strikeout');
+    fly.atbat('triple', C);
+    fly.atbat('walk', A);
+    const sf = fly.atbat('sacrifice_fly', B);
+    expect(sf.rbi).toBe(1);
+    expect(ids(fly.bases())).toEqual([A, null, null]);
+    expect(fly.outs()).toBe(2);
+    expect(runsByInning(fly.events).get(1)).toBe(1);
+
+    const bunt = new Sim();
+    bunt.atbat('strikeout');
+    bunt.atbat('triple', C);
+    bunt.atbat('walk', A);
+    const sh = bunt.atbat('sacrifice', B);
+    expect(sh.rbi).toBe(1);
+    expect(ids(bunt.bases())).toEqual([null, A, null]);
+    expect(bunt.outs()).toBe(2);
   });
 
   it('盜壘失敗、牽制造成第三出局就換局', () => {
@@ -544,9 +594,48 @@ describe('standaloneDefaults', () => {
     }
   });
 
-  it('盜壘／盜壘失敗／牽制／其他：預設留在原壘，由使用者選', () => {
-    for (const t of ['steal', 'caught_stealing', 'pickoff', 'other'] as const) {
-      expect(dest(standaloneDefaults(t, bases(A, B, null)))).toEqual({ 1: 1, 2: 2 });
+  it('暴投／捕逸／投手犯規：被擋住的跑者依序推進（滿壘全部推進、三壘得分）', () => {
+    for (const t of ['wild_pitch', 'passed_ball', 'balk'] as const) {
+      expect(dest(standaloneDefaults(t, bases(A, B, C)))).toEqual({ 1: 2, 2: 3, 3: 4 });
+      expect(dest(standaloneDefaults(t, bases(A, null, null)))).toEqual({ 1: 2 });
+    }
+  });
+
+  it('盜壘：最前面的跑者推進一個壘，其他留原壘', () => {
+    expect(dest(standaloneDefaults('steal', bases(A, null, null)))).toEqual({ 1: 2 });
+    expect(dest(standaloneDefaults('steal', bases(A, B, null)))).toEqual({ 1: 1, 2: 3 });
+    expect(dest(standaloneDefaults('steal', bases(A, null, C)))).toEqual({ 1: 1, 3: 4 });
+  });
+
+  it('盜壘失敗／牽制出局：最前面的跑者出局', () => {
+    for (const t of ['caught_stealing', 'pickoff'] as const) {
+      const moves = standaloneDefaults(t, bases(A, B, null));
+      expect(dest(moves)).toEqual({ 1: 1, 2: null });
+      expect(movesOuts(moves)).toBe(1);
+      expect(dest(standaloneDefaults(t, bases(A, null, null)))).toEqual({ 1: null });
+    }
+  });
+
+  it('其他：預設留在原壘，由使用者選', () => {
+    expect(dest(standaloneDefaults('other', bases(A, B, null)))).toEqual({ 1: 1, 2: 2 });
+  });
+
+  it('預設可以手動修改（例如盜壘失敗改成一壘跑者出局）', () => {
+    const g = new Sim();
+    g.atbat('single', A);
+    g.atbat('single', B); // A 上二壘、B 一壘
+    g.standalone('caught_stealing', (m) => set(1, null)(set(2, 2)(m)));
+    expect(ids(g.bases())).toEqual([null, A, null]);
+    expect(g.outs()).toBe(1);
+  });
+
+  it('所有預設都通過驗證', () => {
+    const allBases = [
+      bases(A, null, null), bases(null, B, null), bases(null, null, C),
+      bases(A, B, null), bases(A, null, C), bases(null, B, C), bases(A, B, C),
+    ];
+    for (const b of allBases) for (const e of STANDALONE_EVENTS) {
+      expect(validateMoves(standaloneDefaults(e.type, b)), `${e.type} ${ids(b)}`).toBeNull();
     }
   });
 
@@ -653,6 +742,77 @@ describe('parseRunnerInputs（API 輸入）', () => {
     expect(parseRunnerInputs([{ from_base: 0, to_base: null }], true)).toEqual([
       { runner_player_id: null, from_base: 0, to_base: null },
     ]);
+  });
+});
+
+describe('parseAllRunnerInputs / movedRunners', () => {
+  it('保留停在原壘的跑者供伺服器驗證，寫入時只留有移動的', () => {
+    const all = parseAllRunnerInputs(
+      [
+        { player_id: A, from_base: 1, to_base: 2 },
+        { player_id: C, from_base: 3, to_base: 3 },
+      ],
+      false
+    );
+    expect(all).toEqual([
+      { runner_player_id: A, from_base: 1, to_base: 2 },
+      { runner_player_id: C, from_base: 3, to_base: 3 },
+    ]);
+    expect(movedRunners(all!)).toEqual([{ runner_player_id: A, from_base: 1, to_base: 2 }]);
+  });
+});
+
+describe('checkRunnersOnBases（伺服器端確認跑者在壘上）', () => {
+  const r = (playerId: string | null, from: number, to: number | null) => ({
+    runner_player_id: playerId,
+    from_base: from,
+    to_base: to,
+  });
+
+  it('跑者都在壘上且 ID 相符時通過', () => {
+    expect(checkRunnersOnBases([r(BATTER, 0, 1), r(A, 1, 2), r(C, 3, 4)], bases(A, null, C))).toBeNull();
+    expect(checkRunnersOnBases([r(A, 1, 2)], bases(A, null, null))).toBeNull();
+  });
+
+  it('送來的 from_base 該壘沒有跑者要拒絕', () => {
+    expect(checkRunnersOnBases([r(A, 2, 3)], bases(A, null, null))).toMatch('2 壘目前沒有跑者');
+    expect(checkRunnersOnBases([r(BATTER, 0, 1), r(C, 3, 4)], EMPTY_BASES)).toMatch('3 壘');
+    // 停在原壘的也要在壘上
+    expect(checkRunnersOnBases([r(A, 1, 2), r(B, 2, 2)], bases(A, null, null))).toMatch('2 壘');
+  });
+
+  it('跑者 ID 不符要拒絕（含未知跑者對上已知跑者）', () => {
+    expect(checkRunnersOnBases([r(B, 1, 2)], bases(A, null, null))).toMatch('跑者與紀錄不符');
+    expect(checkRunnersOnBases([r(null, 1, 2)], bases(A, null, null))).toMatch('不符');
+    // 已刪除球員（ID 為 null）的跑者送 null 才相符
+    const deleted: Bases = [null, { playerId: null, player: null }, null, null];
+    expect(checkRunnersOnBases([r(null, 1, 2)], deleted)).toBeNull();
+  });
+
+  it('沒送到的壘上跑者視為留在原壘，不能被超越或同壘兩人', () => {
+    expect(checkRunnersOnBases([r(A, 1, 2)], bases(A, B, null))).toMatch('2 壘');
+    expect(checkRunnersOnBases([r(A, 1, 4)], bases(A, null, C))).toMatch('超越');
+    expect(checkRunnersOnBases([r(BATTER, 0, 1)], bases(A, null, null))).toMatch('1 壘');
+  });
+
+  it('第三出局後回本壘的分只警告不擋', () => {
+    // 兩出局飛球接殺（打者出局＝第三出局），三壘跑者仍被手動改成得分
+    expect(checkRunnersOnBases([r(BATTER, 0, null), r(C, 3, 4)], bases(null, null, C))).toBeNull();
+  });
+
+  it('用模擬比賽重播出的壘包驗證每一筆預設去向', () => {
+    const g = new Sim();
+    const check = (moves: RunnerMove[]) =>
+      checkRunnersOnBases(
+        parseAllRunnerInputs(moves.map((m) => ({ player_id: m.playerId, from_base: m.from, to_base: m.to })), moves.some((m) => m.from === 0))!,
+        g.bases()
+      );
+    g.atbat('single', A);
+    expect(check(defaultMoves('double', g.bases(), batter, g.outs()))).toBeNull();
+    expect(check(standaloneDefaults('steal', g.bases()))).toBeNull();
+    // 畫面過期：以為一壘有人，實際 A 已盜上二壘
+    g.standalone('steal');
+    expect(check([{ playerId: A, player: null, from: 1, to: 2 }])).toMatch('1 壘目前沒有跑者');
   });
 });
 

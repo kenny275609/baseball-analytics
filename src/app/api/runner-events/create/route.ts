@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { authorize } from '@/lib/auth';
-import { isStandaloneType, isUuid, parseRunnerInputs } from '@/lib/baserunning';
+import { isStandaloneType, isUuid, movedRunners, parseAllRunnerInputs } from '@/lib/baserunning';
+import { checkRunnersInDb } from '@/lib/basesServer';
 import { isMissingTable, syncGameScore } from '@/lib/score';
 
 // 兩個打席之間的跑壘（盜壘、暴投、捕逸、牽制…），同一次送出的跑者算同一個 play
@@ -19,13 +20,23 @@ export async function POST(request: Request) {
     if (!isStandaloneType(body.event_type)) {
       return NextResponse.json({ error: '請選擇跑壘事件' }, { status: 400 });
     }
-    const runners = parseRunnerInputs(body.runners, false);
-    if (!runners) {
+    const allRunners = parseAllRunnerInputs(body.runners, false);
+    if (!allRunners) {
       return NextResponse.json({ error: '跑壘資料錯誤' }, { status: 400 });
     }
+    const runners = movedRunners(allRunners);
     if (runners.length === 0) {
       return NextResponse.json({ error: '沒有跑者移動' }, { status: 400 });
     }
+    // 跑者必須真的在壘上（以資料庫裡該局的事件為準）
+    const check = await checkRunnersInDb(supabase, body.game_id, inning, allRunners);
+    if (check.kind === 'invalid') {
+      return NextResponse.json({ error: check.error }, { status: 400 });
+    }
+    if (check.kind === 'missing') {
+      return NextResponse.json({ error: '跑壘資料表尚未建立，請先執行 migration' }, { status: 503 });
+    }
+    if (check.kind === 'failed') throw check.error;
 
     const playId = crypto.randomUUID();
     const { data, error } = await supabase
