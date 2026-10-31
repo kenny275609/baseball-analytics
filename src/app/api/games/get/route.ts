@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { authorize } from '@/lib/auth';
+import { isMissingTable } from '@/lib/score';
 
 export async function GET(request: Request) {
   try {
@@ -13,7 +14,7 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: 'ID is required' }, { status: 400 });
     }
 
-    const [gameRes, lineupRes, atbatsRes] = await Promise.all([
+    const [gameRes, lineupRes, atbatsRes, eventsRes, inningsRes] = await Promise.all([
       supabase.from('games').select('*').eq('id', id).single(),
       supabase
         .from('game_lineups')
@@ -25,6 +26,12 @@ export async function GET(request: Request) {
         .select('*, players(name, number)')
         .eq('game_id', id)
         .order('created_at'),
+      supabase
+        .from('runner_events')
+        .select('*, players(name, number)')
+        .eq('game_id', id)
+        .order('created_at'),
+      supabase.from('game_innings').select('inning, opp_runs').eq('game_id', id).order('inning'),
     ]);
 
     if (gameRes.error) {
@@ -35,9 +42,18 @@ export async function GET(request: Request) {
     }
     if (lineupRes.error) throw lineupRes.error;
     if (atbatsRes.error) throw atbatsRes.error;
+    // migration 還沒執行時當作沒有跑壘資料，頁面照常顯示
+    if (eventsRes.error && !isMissingTable(eventsRes.error)) throw eventsRes.error;
+    if (inningsRes.error && !isMissingTable(inningsRes.error)) throw inningsRes.error;
 
     return NextResponse.json(
-      { game: gameRes.data, lineup: lineupRes.data, atbats: atbatsRes.data },
+      {
+        game: gameRes.data,
+        lineup: lineupRes.data,
+        atbats: atbatsRes.data,
+        runner_events: eventsRes.data ?? [],
+        innings: inningsRes.data ?? [],
+      },
       { status: 200 }
     );
   } catch (error) {
