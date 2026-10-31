@@ -106,6 +106,61 @@ describe('createSubstitution', () => {
     expect(rollback.calls).toContainEqual({ method: 'eq', args: ['id', SUB] });
   });
 
+  it('撤回換人紀錄失敗：回 500（不能回 409，否則同一個 client_id 重送會被當成已完成）', async () => {
+    const { client } = mockClient({
+      'games:select': [live],
+      'game_lineups:select': [lineup],
+      'game_substitutions:insert': [inserted],
+      'game_lineups:update': [{ data: [], error: null }],
+      'game_substitutions:delete': [{ data: null, error: { message: 'network' } }],
+    });
+    expect(await createSubstitution(client, input)).toMatchObject({ status: 500 });
+  });
+
+  it('同一位替補同時被換進另一棒（唯一索引 23505）：撤回換人紀錄並回 409', async () => {
+    const { client, ops } = mockClient({
+      'games:select': [live],
+      'game_lineups:select': [lineup],
+      'game_substitutions:insert': [inserted],
+      'game_lineups:update': [{ data: null, error: { code: '23505' } }],
+    });
+    expect(await createSubstitution(client, input)).toMatchObject({ status: 409, body: { conflict: true } });
+    expect(ops.some((o) => o.table === 'game_substitutions' && o.op === 'delete')).toBe(true);
+  });
+
+  it('一般替換：換下的人在壘上就回 409，請改用代跑', async () => {
+    const { client, ops } = mockClient({
+      'games:select': [live],
+      'game_lineups:select': [lineup],
+      'runner_events:select': [{ data: [{ play_id: 'p1', inning: 3, runner_player_id: B, from_base: 0, to_base: 1, created_at: '2026-11-01T10:00:00Z' }], error: null }],
+    });
+    const replace = { ...input, sub_type: 'replace' as const };
+    expect(await createSubstitution(client, replace)).toMatchObject({ status: 409, body: { error: expect.stringContaining('代跑') } });
+    expect(ops.some((o) => o.op === 'insert')).toBe(false);
+  });
+
+  it('一般替換：該局已三出局，壘上剩下的殘壘不擋', async () => {
+    const t = '2026-11-01T10:00:00Z';
+    const { client } = mockClient({
+      'games:select': [live],
+      'game_lineups:select': [lineup],
+      'runner_events:select': [
+        {
+          data: [
+            { play_id: 'p1', inning: 3, runner_player_id: B, from_base: 0, to_base: 1, created_at: t },
+            { play_id: 'p2', inning: 3, runner_player_id: A, from_base: 0, to_base: null, created_at: t },
+            { play_id: 'p3', inning: 3, runner_player_id: A, from_base: 0, to_base: null, created_at: t },
+            { play_id: 'p4', inning: 3, runner_player_id: A, from_base: 0, to_base: null, created_at: t },
+          ],
+          error: null,
+        },
+      ],
+      'game_substitutions:insert': [inserted],
+      'game_lineups:update': [{ data: [{ batting_order: 2 }], error: null }],
+    });
+    expect(await createSubstitution(client, { ...input, sub_type: 'replace' as const })).toMatchObject({ status: 201 });
+  });
+
   it('比賽已結束：不能換人', async () => {
     const { client } = mockClient({ 'games:select': [{ data: { id: GAME, status: 'final' }, error: null }] });
     expect(await createSubstitution(client, input)).toMatchObject({ status: 400 });
@@ -183,5 +238,14 @@ describe('undoSubstitution', () => {
     const updates = ops.filter((o) => o.table === 'game_lineups' && o.op === 'update');
     expect(updates).toHaveLength(2);
     expect(updates[1].calls).toContainEqual({ method: 'update', args: [{ player_id: PH }] });
+  });
+
+  it('換人紀錄刪不掉、打序也改不回去：回 500', async () => {
+    const { client } = mockClient({
+      'game_substitutions:select': [{ data: row, error: null }],
+      'game_lineups:update': [{ data: [{ batting_order: 2 }], error: null }, { data: null, error: { message: 'network' } }],
+      'game_substitutions:delete': [{ data: [], error: null }],
+    });
+    expect(await undoSubstitution(client, GAME, SUB)).toMatchObject({ ok: false, status: 500 });
   });
 });

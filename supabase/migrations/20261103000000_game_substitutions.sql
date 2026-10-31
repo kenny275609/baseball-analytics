@@ -33,11 +33,34 @@ CREATE TABLE IF NOT EXISTS public.game_substitutions (
   CONSTRAINT game_substitutions_runner_base
     CHECK (((sub_type = 'pinch_runner') = (base IS NOT NULL)) AND (sub_type <> 'pinch_runner' OR inning IS NOT NULL)),
   CONSTRAINT game_substitutions_add_slot
-    CHECK (sub_type <> 'add_slot' OR out_player_id IS NULL)
+    CHECK (sub_type <> 'add_slot' OR out_player_id IS NULL),
+  -- 換上和換下不能是同一人；有半局就一定有局數
+  CONSTRAINT game_substitutions_diff_players
+    CHECK (out_player_id IS NULL OR in_player_id IS NULL OR out_player_id <> in_player_id),
+  CONSTRAINT game_substitutions_half_inning
+    CHECK (half IS NULL OR inning IS NOT NULL)
 );
 
 CREATE INDEX IF NOT EXISTS idx_game_substitutions_game_id
   ON public.game_substitutions(game_id, created_at);
+
+-- 同一場比賽一位球員只能在一個棒次：兩支手機同時把同一位替補換進不同棒次時，
+-- 後寫入的那支會撞到這個索引（23505），API 撤回換人紀錄並回 409。
+-- 舊版「直接覆寫打序」可能已經讓同一位球員出現在兩個棒次；有這種資料時不建索引（不自動刪資料），
+-- 只發出 WARNING。先用下面的查詢找出重複的打序、手動修正後再執行一次這個 migration：
+--   SELECT game_id, player_id, array_agg(batting_order ORDER BY batting_order) AS batting_orders
+--   FROM public.game_lineups GROUP BY game_id, player_id HAVING COUNT(*) > 1;
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM public.game_lineups GROUP BY game_id, player_id HAVING COUNT(*) > 1
+  ) THEN
+    RAISE WARNING 'game_lineups 有同一場比賽同一位球員重複出現在多個棒次，未建立 idx_game_lineups_game_player；請修正後重新執行此 migration';
+  ELSE
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_game_lineups_game_player
+      ON public.game_lineups(game_id, player_id);
+  END IF;
+END $$;
 
 ALTER TABLE public.game_substitutions ENABLE ROW LEVEL SECURITY;
 

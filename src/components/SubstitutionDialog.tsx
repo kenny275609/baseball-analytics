@@ -15,6 +15,7 @@ import { Bases, RunnerPlayerRef } from '@/lib/baserunning';
 import {
   Half,
   LineupEntry,
+  ON_BASE_REPLACE_ERROR,
   SUB_TYPES,
   SubType,
   benchPlayers,
@@ -22,6 +23,7 @@ import {
   inningLabel,
   nextSlotNumber,
   offenseHalf,
+  playerOnBase,
   slotOfPlayer,
 } from '@/lib/substitution';
 
@@ -118,12 +120,15 @@ export function SubstitutionDialog({
   let problem: string | null = null;
   if (type === 'pinch_runner') {
     if (occupied.length === 0) problem = '壘上沒有跑者，不能代跑';
-    else if (!base) problem = '請選擇要代跑的壘包';
+    // 409 重新載入後原本選的壘包可能已經沒人：請重新選壘包
+    else if (!base || !runner) problem = '請選擇要代跑的壘包';
     else if (!slotNo) problem = '這位跑者不在目前的打序上，無法代跑';
   } else if (type === 'add_slot' && !slotNo) {
     problem = '已經到 20 棒上限';
   } else if (type !== 'add_slot' && !outEntry) {
     problem = '請選擇棒次';
+  } else if (type === 'replace' && playerOnBase(bases, outEntry?.player_id ?? null)) {
+    problem = ON_BASE_REPLACE_ERROR;
   }
   if (!problem && bench.length === 0) problem = '沒有可以換上場的球員（球員名單都已在打序上，或名單沒有載入）';
 

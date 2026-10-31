@@ -15,7 +15,9 @@ export const MIGRATION_ERROR =
 
 type Result =
   | { status: 200 | 201; body: { substitution: Substitution; duplicate?: boolean } }
-  | { status: 400 | 404 | 409 | 503; body: { error: string; conflict?: boolean } };
+  | { status: 400 | 404 | 409 | 500 | 503; body: { error: string; conflict?: boolean } };
+
+const ROLLBACK_ERROR = '換人沒有完成，而且自動還原失敗；請重新整理確認打序與換人紀錄';
 
 async function findByClientId(supabase: SupabaseClient, gameId: string, clientId: string) {
   const { data, error } = await supabase
@@ -65,11 +67,13 @@ export async function createSubstitution(supabase: SupabaseClient, input: Substi
     .eq('game_id', gameId);
   if (lineupError) throw lineupError;
 
+  // 代跑要確認跑者在壘上；一般替換要確認換下的人不在壘上（壘上的人只能用代跑換）
   let bases = null;
-  if (input.sub_type === 'pinch_runner') {
+  if (input.sub_type === 'pinch_runner' || (input.sub_type === 'replace' && input.inning)) {
     const replay = await basesInDb(supabase, gameId, input.inning as number);
     if (replay.kind === 'failed') throw replay.error;
-    if (replay.kind === 'ok') bases = replay.bases;
+    // 一般替換：該局已三出局時壘上剩下的是殘壘，不算在壘上
+    if (replay.kind === 'ok' && (input.sub_type === 'pinch_runner' || replay.outs < 3)) bases = replay.bases;
   }
   const problem = checkSubstitution(input, lineup ?? [], bases);
   if (problem) return { status: problem.status, body: { error: problem.error, conflict: problem.status === 409 } };
@@ -115,7 +119,12 @@ export async function createSubstitution(supabase: SupabaseClient, input: Substi
           .eq('player_id', input.out_player_id as string)
           .select('batting_order');
   if (lineupWrite.error || !lineupWrite.data?.length) {
-    await supabase.from('game_substitutions').delete().eq('id', sub.id);
+    const { error: rollbackError } = await supabase.from('game_substitutions').delete().eq('id', sub.id);
+    if (rollbackError) {
+      // 換人紀錄留著但打序沒改：不能回 409（同一個 client_id 重送會被當成已完成）
+      console.error('Failed to roll back substitution', sub.id, rollbackError, lineupWrite.error);
+      return { status: 500, body: { error: ROLLBACK_ERROR } };
+    }
     if (lineupWrite.error && !isUniqueViolation(lineupWrite.error)) throw lineupWrite.error;
     return {
       status: 409,
@@ -132,7 +141,7 @@ export async function undoSubstitution(
   supabase: SupabaseClient,
   gameId: string,
   subId: string
-): Promise<{ ok: true } | { ok: false; status: 403 | 409; error: string }> {
+): Promise<{ ok: true } | { ok: false; status: 403 | 409 | 500; error: string }> {
   const { data: sub, error } = await supabase
     .from('game_substitutions')
     .select('id, sub_type, batting_order, out_player_id, in_player_id')
@@ -175,17 +184,21 @@ export async function undoSubstitution(
     .select('id');
   if (delError || !deleted?.length) {
     // 換人紀錄刪不掉（例如沒有權限）：把打序改回去，維持一致
-    if (isAdd) {
-      await supabase
-        .from('game_lineups')
-        .insert({ game_id: gameId, batting_order: sub.batting_order, player_id: sub.in_player_id });
-    } else {
-      await supabase
-        .from('game_lineups')
-        .update({ player_id: sub.in_player_id })
-        .eq('game_id', gameId)
-        .eq('batting_order', sub.batting_order)
-        .eq('player_id', sub.out_player_id);
+    const reapply = isAdd
+      ? await supabase
+          .from('game_lineups')
+          .insert({ game_id: gameId, batting_order: sub.batting_order, player_id: sub.in_player_id })
+          .select('batting_order')
+      : await supabase
+          .from('game_lineups')
+          .update({ player_id: sub.in_player_id })
+          .eq('game_id', gameId)
+          .eq('batting_order', sub.batting_order)
+          .eq('player_id', sub.out_player_id)
+          .select('batting_order');
+    if (reapply.error || !reapply.data?.length) {
+      console.error('Failed to re-apply lineup after undo failure', subId, reapply.error, delError);
+      return { ok: false, status: 500, error: '撤銷換人沒有完成，而且打序自動還原失敗；請重新整理確認打序' };
     }
     if (delError) throw delError;
     return { ok: false, status: 403, error: '無法撤銷這次換人（可能沒有權限）' };

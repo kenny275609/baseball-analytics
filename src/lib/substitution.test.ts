@@ -12,6 +12,7 @@ import {
   boxScoreRows,
   checkSubstitution,
   formerBySlot,
+  formerNamesForSlot,
   inningLabel,
   nextSlotNumber,
   offenseHalf,
@@ -27,6 +28,7 @@ const C = uuid(3);
 const PR = uuid(7); // 代跑
 const PH = uuid(8); // 代打
 const X = uuid(9); // 加棒次
+const PR2 = uuid(10); // 第二位代跑
 
 const at = (sec: number) => `2026-11-01T10:00:${String(sec).padStart(2, '0')}.000000+00:00`;
 const ref = (name: string) => ({ name, number: null });
@@ -168,6 +170,103 @@ describe('代跑：壘包與之後的跑壘', () => {
     ];
     expect(slotOfPlayer(lineup, A)).toBe(1);
     expect(slotOfPlayer(lineup, C)).toBeNull();
+  });
+});
+
+describe('同一棒同局連續換人', () => {
+  it('代打上壘後同局再被代跑：壘包、推進、得分都跟著換人', () => {
+    // 1 局：第 3 棒 A 被 PH 代打 → PH 一壘安打 → PR 代跑 PH → B 二壘安打（PR 上三壘）→ C 安打（PR 得分）
+    const subs = [
+      sub({ id: 's1', sub_type: 'pinch_hitter', batting_order: 3, out_player_id: A, out_player: ref('A'), in_player_id: PH, in_player: ref('PH'), created_at: at(5) }),
+      sub({ id: 's2', sub_type: 'pinch_runner', batting_order: 3, out_player_id: PH, out_player: ref('PH'), in_player_id: PR, in_player: ref('PR'), base: 1, created_at: at(15) }),
+    ];
+    const events = [
+      ev('e1', 'p1', 'a1', PH, 0, 1, at(10)),
+      ev('e2', 'p2', 'a2', B, 0, 2, at(20)),
+      ev('e3', 'p2', 'a2', PR, 1, 3, at(20)),
+      ev('e4', 'p3', 'a3', C, 0, 1, at(30)),
+      ev('e5', 'p3', 'a3', PR, 3, 4, at(30)),
+    ];
+    const runnerSubs = subs.filter((x) => x.sub_type === 'pinch_runner');
+    expect(computeBases(events.slice(0, 1), 1, runnerSubs)[1]?.playerId).toBe(PR);
+    expect(computeBases(events.slice(0, 3), 1, runnerSubs)[3]?.playerId).toBe(PR);
+    const final = computeBases(events, 1, runnerSubs);
+    expect([1, 2, 3].map((b) => final[b]?.playerId)).toEqual([C, B, undefined]);
+
+    expect(formerBySlot(subs).get(3)!.map((f) => f.playerId)).toEqual([A, PH]);
+    const lineup = [
+      { batting_order: 1, player_id: B, players: ref('B') },
+      { batting_order: 2, player_id: C, players: ref('C') },
+      { batting_order: 3, player_id: PR, players: ref('PR') },
+    ];
+    const atbats = [atbat('a0', A, 3, at(1), 'strikeout'), atbat('a1', PH, 3, at(10))];
+    expect(boxScoreRows(lineup, subs, atbats).map((r) => [r.playerId, r.slot, r.current])).toEqual([
+      [B, 1, true],
+      [C, 2, true],
+      [A, 3, false],
+      [PH, 3, false],
+      [PR, 3, true],
+    ]);
+  });
+
+  it('同一位跑者連續兩次代跑（PR1 代跑 A，PR2 再代跑 PR1）：依序換到 PR2', () => {
+    const events = [ev('e1', 'p1', 'a1', A, 0, 2, at(1)), ev('e2', 'p2', 'a2', B, 0, 1, at(30)), ev('e3', 'p2', 'a2', PR2, 2, 3, at(30))];
+    const subs = [
+      sub({ id: 's1', sub_type: 'pinch_runner', batting_order: 1, out_player_id: A, in_player_id: PR, base: 2, created_at: at(10) }),
+      sub({ id: 's2', sub_type: 'pinch_runner', batting_order: 1, out_player_id: PR, in_player_id: PR2, in_player: ref('PR2'), base: 2, created_at: at(20) }),
+    ];
+    expect(computeBases(events.slice(0, 1), 1, subs)[2]).toEqual({ playerId: PR2, player: ref('PR2') });
+    // 資料順序亂掉也依時間套用
+    expect(computeBases(events.slice(0, 1), 1, [subs[1], subs[0]])[2]?.playerId).toBe(PR2);
+    const after = computeBases(events, 1, subs);
+    expect(after[3]?.playerId).toBe(PR2);
+    expect([1, 2, 3].map((b) => after[b]?.playerId)).not.toContain(PR);
+  });
+
+  it('還沒同步的預覽紀錄（手機時間比伺服器慢）一律排在代跑之後', () => {
+    // 代跑在伺服器時間 at(20)，之後這支手機記的推進用手機時間 at(15)
+    const pr = sub({ id: 's1', sub_type: 'pinch_runner', batting_order: 1, out_player_id: A, in_player_id: PR, base: 2, created_at: at(20) });
+    // 之後（都還沒同步）：PR 得分，打完一輪 A 再上場後上一壘
+    const events = [
+      ev('e1', 'p1', 'a1', A, 0, 2, at(1)),
+      ev('pending:c1:2', 'c1', 'pending:c1', PR, 2, 4, at(15)),
+      ev('pending:c2:0', 'c2', 'pending:c2', A, 0, 1, at(16)),
+    ];
+    const bases = computeBases(events, 1, [pr]);
+    // 代跑不會被延後套用到再上壘的 A 身上
+    expect(bases[1]?.playerId).toBe(A);
+    expect([1, 2, 3].map((b) => bases[b]?.playerId)).not.toContain(PR);
+  });
+});
+
+describe('已退場球員再上場', () => {
+  // 第 3 棒：A 先發 → B 換下 A → A 再換下 B
+  const subs = [
+    sub({ id: 's1', sub_type: 'replace', batting_order: 3, out_player_id: A, out_player: ref('A'), in_player_id: B, in_player: ref('B'), created_at: at(10) }),
+    sub({ id: 's2', sub_type: 'replace', batting_order: 3, out_player_id: B, out_player: ref('B'), in_player_id: A, in_player: ref('A'), created_at: at(20) }),
+  ];
+  const lineup = [
+    { batting_order: 1, player_id: C, players: ref('C') },
+    { batting_order: 3, player_id: A, players: ref('A') },
+  ];
+
+  it('本場成績：目前在場上的 A 是 current，不標退場', () => {
+    const rows = boxScoreRows(lineup, subs, [atbat('a1', A, 3, at(1)), atbat('a2', B, 3, at(15))]);
+    expect(rows.map((r) => [r.playerId, r.slot, r.current])).toEqual([
+      [C, 1, true],
+      [B, 3, false],
+      [A, 3, true],
+    ]);
+  });
+
+  it('打序列的刪除線不再列出目前的球員，同一人只列一次', () => {
+    const former = formerBySlot(subs).get(3)!;
+    expect(formerNamesForSlot(former, A).map((f) => f.playerId)).toEqual([B]);
+    const again = formerBySlot([
+      ...subs,
+      sub({ id: 's3', sub_type: 'replace', batting_order: 3, out_player_id: A, in_player_id: B, created_at: at(30) }),
+    ]).get(3)!;
+    expect(formerNamesForSlot(again, B).map((f) => f.playerId)).toEqual([A]);
   });
 });
 
@@ -355,6 +454,13 @@ describe('checkSubstitution（以伺服器目前打序檢查）', () => {
     expect(checkSubstitution(pr, lineup, bases)).toBeNull();
     expect(checkSubstitution({ ...pr, base: 1 }, lineup, bases)).toMatchObject({ status: 409 });
     expect(checkSubstitution(pr, lineup, computeBases([ev('e1', 'p1', 'a1', B, 0, 2, at(1))], 1))).toMatchObject({ status: 409 });
+  });
+
+  it('一般替換不能換壘上的跑者（要用代跑）', () => {
+    const onBase = computeBases([ev('e1', 'p1', 'a1', B, 0, 2, at(1))], 1);
+    expect(checkSubstitution(input, lineup, onBase)).toMatchObject({ status: 409, error: expect.stringContaining('代跑') });
+    // 不在壘上的人照常替換
+    expect(checkSubstitution(input, lineup, computeBases([ev('e1', 'p1', 'a1', A, 0, 2, at(1))], 1))).toBeNull();
   });
 });
 

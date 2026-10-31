@@ -106,6 +106,16 @@ export function formerBySlot(subs: Substitution[]): Map<number, FormerPlayer[]> 
   return map;
 }
 
+// 打序列上這一棒已換下的球員（刪除線）：不含目前在這一棒的人（再上場），同一人只列一次
+export function formerNamesForSlot(former: FormerPlayer[], currentId: string | null): FormerPlayer[] {
+  const seen = new Set<string>();
+  return former.filter((f) => {
+    if (f.playerId && (f.playerId === currentId || seen.has(f.playerId))) return false;
+    if (f.playerId) seen.add(f.playerId);
+    return true;
+  });
+}
+
 // 本場成績的球員順序：依棒次，每一棒先列先發（最早上場的），再依序列出替補，最後是目前的球員；
 // 打過但不在任何棒次紀錄裡的人（例如舊版直接覆寫打序）排在最後。成績本身一律依 atbats.player_id 計算
 export function boxScoreRows(
@@ -121,8 +131,12 @@ export function boxScoreRows(
     rows.push({ playerId, player, slot, current });
   };
   const former = formerBySlot(subs);
+  // 換下後又再上場的人以目前的棒次為準，不列成退場
+  const currentIds = new Set(lineup.map((l) => l.player_id));
   for (const order of battingOrders(lineup)) {
-    for (const f of former.get(order) ?? []) add(f.playerId, f.player, order, false);
+    for (const f of former.get(order) ?? []) {
+      if (!f.playerId || !currentIds.has(f.playerId)) add(f.playerId, f.player, order, false);
+    }
     const cur = lineup.find((l) => l.batting_order === order);
     if (cur) add(cur.player_id, cur.players, order, true);
   }
@@ -234,5 +248,16 @@ export function checkSubstitution(
       return { status: 409, error: `${input.base} 壘跑者與畫面不符（可能是其他裝置剛記錄），請重新整理` };
     }
   }
+  // 一般替換不會換壘上的跑者：換掉壘上的人會讓打序和壘包對不上，之後也無法再代跑
+  if (input.sub_type === 'replace' && playerOnBase(bases, input.out_player_id)) {
+    return { status: 409, error: ON_BASE_REPLACE_ERROR };
+  }
   return null;
+}
+
+export const ON_BASE_REPLACE_ERROR = '這位球員目前在壘上，請改用「代跑」換人';
+
+export function playerOnBase(bases: Bases | null, playerId: string | null): boolean {
+  if (!bases || !playerId) return false;
+  return ([1, 2, 3] as const).some((b) => bases[b]?.playerId === playerId);
 }

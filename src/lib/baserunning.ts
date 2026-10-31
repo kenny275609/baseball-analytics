@@ -82,7 +82,7 @@ function groupByPlay<T extends Pick<RunnerEvent, 'play_id'>>(events: T[]): T[][]
 export type BaseReplayEvent = Pick<
   RunnerEvent,
   'play_id' | 'inning' | 'runner_player_id' | 'from_base' | 'to_base' | 'players'
-> & { created_at?: string };
+> & { id?: string; created_at?: string };
 
 // 代跑（game_substitutions 的 pinch_runner）：在換人的時間點把壘上的原跑者換成代跑者，
 // 之後的跑壘事件就是代跑者在跑
@@ -128,8 +128,9 @@ export function computeBases(events: BaseReplayEvent[], inning: number, runnerSu
     .sort((a, b) => replayTime(a.created_at) - replayTime(b.created_at));
   let nextSub = 0;
   for (const play of groupByPlay(events.filter((e) => e.inning === inning))) {
-    // 這個 play 之前做的代跑先換上
-    const playTime = replayTime(play[0].created_at);
+    // 這個 play 之前做的代跑先換上。還沒同步的預覽紀錄（id 以 pending: 開頭）用手機時間，
+    // 可能比伺服器時間早；換人只能在沒有待同步紀錄時進行，所以它們一定晚於所有代跑
+    const playTime = play[0].id?.startsWith('pending:') ? Infinity : replayTime(play[0].created_at);
     while (nextSub < subs.length && replayTime(subs[nextSub].created_at) < playTime) {
       applyRunnerSub(bases, subs[nextSub++]);
     }

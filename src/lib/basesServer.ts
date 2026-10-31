@@ -27,7 +27,7 @@ export async function basesInDb(
   supabase: SupabaseClient,
   gameId: string,
   inning: number
-): Promise<{ kind: 'ok'; bases: Bases } | { kind: 'missing' } | { kind: 'failed'; error: unknown }> {
+): Promise<{ kind: 'ok'; bases: Bases; outs: number } | { kind: 'missing' } | { kind: 'failed'; error: unknown }> {
   const [eventsRes, subsRes] = await Promise.all([
     supabase
       .from('runner_events')
@@ -50,5 +50,11 @@ export async function basesInDb(
   if (error) return isMissingTable(error) ? { kind: 'missing' } : { kind: 'failed', error };
   // 換人的 migration 還沒執行：沒有代跑紀錄
   if (subsRes.error && !isMissingTable(subsRes.error)) return { kind: 'failed', error: subsRes.error };
-  return { kind: 'ok', bases: computeBases(data ?? [], inning, subsRes.error ? [] : subsRes.data ?? []) };
+  const events = data ?? [];
+  return {
+    kind: 'ok',
+    bases: computeBases(events, inning, subsRes.error ? [] : subsRes.data ?? []),
+    // 跑壘事件記錄的出局數（to_base 為 null）；三出局後壘上剩下的是殘壘
+    outs: events.filter((e) => e.to_base === null).length,
+  };
 }

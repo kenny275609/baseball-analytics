@@ -71,6 +71,7 @@ import {
   battingOrders,
   boxScoreRows,
   formerBySlot,
+  formerNamesForSlot,
   inningLabel,
   subTypeLabel,
 } from '@/lib/substitution';
@@ -772,6 +773,11 @@ export default function GamePage() {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         setSubError(data.error || '換人失敗');
+        // 伺服器明確回了錯誤，這次換人沒有寫入：下一次送出是新的換人，要用新的 client_id
+        // （否則改選別的棒次再送，可能被當成重送）。閘道逾時（502/504）不確定有沒有寫入，保留原本的
+        if (res.status !== 502 && res.status !== 504) {
+          setSubDialog((prev) => (prev ? { ...prev, clientId: newClientId() } : null));
+        }
         // 打序/壘包已被其他裝置更動：載入最新資料，對話框裡的選項跟著更新
         if (res.status === 409) await load(false, true);
         return;
@@ -822,6 +828,7 @@ export default function GamePage() {
   // 本場個人成績：依棒次列出目前的球員和已被換下的球員（成績依打席當時的打者計算）
   const boxRows = boxScoreRows(lineup, subs, atbats);
   const former = formerBySlot(subs);
+  const latestTarget = latestAction(atbats, runnerEvents, subs);
   const formerIds = new Set(subs.map((x) => x.out_player_id).filter((id): id is string => !!id));
 
   // 記分板：有跑壘資料的比賽我方逐局得分由事件推算，舊比賽只有手動總分
@@ -1012,10 +1019,12 @@ export default function GamePage() {
                 >
                   <div className="text-[11px] opacity-70">第 {l.batting_order} 棒</div>
                   <div className="text-sm font-semibold whitespace-nowrap">{l.players?.name ?? '—'}</div>
-                  {(former.get(l.batting_order) ?? []).length > 0 && (
-                    // 這一棒已被換下的球員（灰色刪除線）
+                  {formerNamesForSlot(former.get(l.batting_order) ?? [], l.player_id).length > 0 && (
+                    // 這一棒已被換下的球員（灰色刪除線；再上場的人不重複列）
                     <div className="max-w-[7rem] truncate text-[11px] line-through opacity-60">
-                      {(former.get(l.batting_order) ?? []).map((f) => f.player?.name ?? '—').join('、')}
+                      {formerNamesForSlot(former.get(l.batting_order) ?? [], l.player_id)
+                        .map((f) => f.player?.name ?? '—')
+                        .join('、')}
                     </div>
                   )}
                 </button>
@@ -1135,6 +1144,8 @@ export default function GamePage() {
               <ul className="divide-y rounded-md border">
                 {byInning.get(inn)!.map((item) => {
                   if (item.kind === 'sub') {
+                    // 換人不能單獨刪除；是最後一筆動作時可以直接撤銷（和「撤銷上一步」相同）
+                    const isLatest = sameTarget(latestTarget, { kind: 'sub', id: item.sub.id });
                     return (
                       <li key={item.sub.id} className="flex items-center gap-2 pl-3 pr-1 py-1.5 text-sm bg-sky-50">
                         <span className="w-4 shrink-0 text-sky-700">⇄</span>
@@ -1142,6 +1153,11 @@ export default function GamePage() {
                           <span className="block font-semibold">{subTypeLabel(item.sub.sub_type)}</span>
                           <span className="block text-xs text-gray-600">{describeSub(item.sub)}</span>
                         </span>
+                        {recording && isLatest && pending.length === 0 && (
+                          <Button variant="ghost" size="sm" className="px-2 text-red-600" disabled={saving || undoing || subSaving} onClick={undoLast}>
+                            {undoing ? '撤銷中' : '撤銷'}
+                          </Button>
+                        )}
                       </li>
                     );
                   }

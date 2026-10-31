@@ -16,6 +16,10 @@ export async function POST(request: Request) {
     if (!Array.isArray(lineup) || lineup.length === 0 || lineup.length > 20) {
       return NextResponse.json({ error: '請排定打序（1–20 人）' }, { status: 400 });
     }
+    // 一位球員只能排一個棒次（資料庫 game_lineups(game_id, player_id) 也有唯一索引）
+    if (new Set(lineup).size !== lineup.length) {
+      return NextResponse.json({ error: '同一位球員不能排在兩個棒次' }, { status: 400 });
+    }
 
     const { data: game, error } = await supabase
       .from('games')
