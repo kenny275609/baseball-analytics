@@ -1,11 +1,11 @@
 import { NextResponse } from 'next/server';
-import type { SupabaseClient } from '@supabase/supabase-js';
 import { createClient } from '@/lib/supabase/server';
 import { authorize } from '@/lib/auth';
+import { findLatest } from '@/lib/conflictServer';
 import { isUuid } from '@/lib/baserunning';
 import { parseClientId } from '@/lib/idempotency';
 import { isMissingTable, syncGameScore } from '@/lib/score';
-import { UndoRequest, latestAction, parseUndoRequest, sameTarget } from '@/lib/undo';
+import { UndoRequest, parseUndoRequest, sameTarget } from '@/lib/undo';
 
 // 撤銷上一步：
 //   { game_id, target: { kind: 'atbat', id } | { kind: 'play', play_id } }
@@ -14,30 +14,6 @@ import { UndoRequest, latestAction, parseUndoRequest, sameTarget } from '@/lib/u
 //   { game_id, client_id }
 //     離線佇列送來的撤銷：刪除這個 client_id（= play_id）寫入的紀錄，沒有就當作成功（可重送）；
 //     同樣必須仍是最新的一筆，之後已有其他紀錄（其他裝置接著記錄）就回 409，不從中間刪
-
-// 以資料庫為準找出最後一筆：最後一個打席 vs 最後一個非打擊跑壘
-async function findLatest(supabase: SupabaseClient, gameId: string) {
-  const [atbatRes, playRes] = await Promise.all([
-    supabase
-      .from('atbats')
-      .select('id, created_at')
-      .eq('game_id', gameId)
-      .order('created_at', { ascending: false })
-      .order('id', { ascending: false })
-      .limit(1),
-    supabase
-      .from('runner_events')
-      .select('id, atbat_id, play_id, created_at')
-      .eq('game_id', gameId)
-      .is('atbat_id', null)
-      .order('created_at', { ascending: false })
-      .order('id', { ascending: false })
-      .limit(1),
-  ]);
-  if (atbatRes.error) throw atbatRes.error;
-  if (playRes.error && !isMissingTable(playRes.error)) throw playRes.error;
-  return latestAction(atbatRes.data ?? [], playRes.error ? [] : playRes.data ?? []);
-}
 
 export async function POST(request: Request) {
   try {

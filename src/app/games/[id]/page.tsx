@@ -44,6 +44,7 @@ import {
   buildAtbatItem,
   buildPlayItem,
   clearBlock,
+  expectedLastFor,
   isPendingId,
   mergePending,
   readQueue,
@@ -61,6 +62,7 @@ import {
   usePendingQueue,
 } from '@/lib/offlineSync';
 import { UndoTarget, latestAction, sameTarget, timeKey } from '@/lib/undo';
+import { readCachedGame, saveCachedGame } from '@/lib/gameCache';
 
 interface PlayerRef {
   name: string;
@@ -170,6 +172,9 @@ export default function GamePage() {
   const [players, setPlayers] = useState<Player[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // 離線打開：顯示的是這支手機上次載入的資料
+  const [stale, setStale] = useState(false);
+  const loadedRef = useRef(false);
 
   const [slot, setSlot] = useState(1);
   const [inning, setInning] = useState(1);
@@ -213,6 +218,7 @@ export default function GamePage() {
   const load = useCallback(
     async (advance: boolean): Promise<GameData | null> => {
       let data: GameData & { error?: string };
+      let fromCache = false;
       const since = syncSeq.current;
       let missed: typeof syncLog.current = [];
       loadsInFlight.current += 1;
@@ -224,8 +230,14 @@ export default function GamePage() {
           return null;
         }
       } catch {
-        setError('網路連線失敗，無法載入最新資料');
-        return null;
+        // 第一次載入就連不上：改用上次載入的資料，至少能繼續記錄（紀錄進離線佇列）
+        const cached = loadedRef.current ? null : readCachedGame<GameData>(queueStorage(), gameId);
+        if (!cached) {
+          setError('網路連線失敗，無法載入最新資料');
+          return null;
+        }
+        data = cached;
+        fromCache = true;
       } finally {
         loadsInFlight.current -= 1;
         missed = syncLog.current.filter((entry) => entry.seq > since);
@@ -238,6 +250,9 @@ export default function GamePage() {
         data.atbats = applied.atbats;
         data.runner_events = applied.events;
       }
+      if (!fromCache) saveCachedGame(queueStorage(), gameId, data);
+      loadedRef.current = true;
+      setStale(fromCache);
       atbatsRef.current = data.atbats;
       eventsRef.current = data.runner_events;
       lineupRef.current = data.lineup;
@@ -262,6 +277,37 @@ export default function GamePage() {
     },
     [gameId]
   );
+
+  // 同步跑完（有紀錄送出、或被伺服器擋下）後重新載入伺服器資料：其他裝置在這段時間記的紀錄也要顯示。
+  // 打者/局數只在伺服器資料改變了推算結果時才跟著變，不蓋掉使用者手動選的棒次
+  const refreshAfterSync = useCallback(async () => {
+    const before = mergedNow();
+    const prev = nextState(before.atbats, before.events, lineupRef.current);
+    if (!(await load(false))) return;
+    const after = mergedNow();
+    const next = nextState(after.atbats, after.events, lineupRef.current);
+    if (next.slot !== prev.slot || next.inning !== prev.inning) {
+      setSlot(next.slot);
+      setInning(next.inning);
+    }
+  }, [load, mergedNow]);
+
+  useEffect(
+    () =>
+      subscribe((e) => {
+        if (e.type !== 'status' || e.gameId !== gameId || !('status' in e.status)) return;
+        if (e.status.status === 'blocked' || e.status.synced > 0) void refreshAfterSync();
+      }),
+    [gameId, refreshAfterSync]
+  );
+
+  // 用上次載入的資料開啟的：恢復連線就改抓伺服器最新資料
+  useEffect(() => {
+    if (!stale) return;
+    const onOnline = () => void refreshAfterSync();
+    window.addEventListener('online', onOnline);
+    return () => window.removeEventListener('online', onOnline);
+  }, [stale, refreshAfterSync]);
 
   // 離線紀錄同步成功：把伺服器回傳的打席/跑壘接上，取代畫面上的暫存版本
   useEffect(
@@ -293,7 +339,9 @@ export default function GamePage() {
     if (canEdit) {
       fetch('/api/players/list')
         .then((res) => res.json())
-        .then((data) => setPlayers(data.players || []));
+        .then((data) => setPlayers(data.players || []))
+        // 離線時沒有球員名單，只是不能換人
+        .catch(() => {});
     }
   }, [canEdit]);
 
@@ -391,6 +439,7 @@ export default function GamePage() {
       note: draft.note,
       moves,
       label: '',
+      expectedLast: expectedLastFor(atbatsRef.current, eventsRef.current, readQueue(queueStorage(), gameId)),
     });
     item.label = describeAtbat(item.preview.atbat, item.preview.events);
     if (!(await submit(item))) return;
@@ -405,7 +454,14 @@ export default function GamePage() {
   };
 
   const saveStandalone = async (type: RunnerEventType, moves: RunnerMove[]) => {
-    const item = buildPlayItem({ gameId, inning, type, moves, label: '' });
+    const item = buildPlayItem({
+      gameId,
+      inning,
+      type,
+      moves,
+      label: '',
+      expectedLast: expectedLastFor(atbatsRef.current, eventsRef.current, readQueue(queueStorage(), gameId)),
+    });
     item.label = describePlay(item.preview.events);
     if (!(await submit(item))) return;
     // 牽制等跑壘事件造成第三個出局就換局（打者不變）
@@ -705,6 +761,11 @@ export default function GamePage() {
       </div>
 
       {error && <div className="text-sm text-red-600 bg-red-50 p-3 rounded-md">{error}</div>}
+      {stale && (
+        <div className="text-sm text-amber-900 bg-amber-50 p-3 rounded-md">
+          目前離線，顯示的是這支手機上次載入的資料；新紀錄會先存在手機，連線後自動上傳並檢查是否和其他裝置衝突。
+        </div>
+      )}
 
       {/* 離線紀錄：還沒上傳到伺服器的筆數與同步狀態 */}
       {blockedItem ? (

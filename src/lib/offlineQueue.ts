@@ -9,6 +9,8 @@
 
 import { AtbatResultFields, parseAtbatInput } from '@/lib/atbat';
 import { RunnerEvent, RunnerEventType, RunnerMove, RunnerPlayerRef } from '@/lib/baserunning';
+import { ExpectedLast } from '@/lib/conflict';
+import { latestAction } from '@/lib/undo';
 
 export interface KeyValueStorage {
   getItem(key: string): string | null;
@@ -217,6 +219,21 @@ export function mergePending<A extends { id: string }, E extends RunnerEvent>(
   return { atbats: outAtbats, events: outEvents };
 }
 
+// 新紀錄送出時帶給伺服器的「前一筆」：佇列裡還有動作就是最後一筆排隊中的動作，
+// 否則是伺服器資料（扣掉待送出撤銷的紀錄）裡最後一筆。伺服器上的最後一筆不是它就回 409
+export function expectedLastFor<A extends { id: string; created_at: string }, E extends RunnerEvent>(
+  atbats: A[],
+  events: E[],
+  queue: QueueItem[]
+): ExpectedLast {
+  const pending = latestPending(queue);
+  if (pending) return { kind: 'client', client_id: pending.clientId };
+  const merged = mergePending(atbats, events, queue) as { atbats: A[]; events: E[] };
+  const latest = latestAction(merged.atbats, merged.events);
+  if (!latest) return { kind: 'none' };
+  return latest.kind === 'atbat' ? { kind: 'atbat', id: latest.id } : { kind: 'play', play_id: latest.play_id };
+}
+
 // 一筆佇列動作同步成功後，把伺服器回傳的打席/跑壘接到伺服器資料上（已存在的 id 不重複加）；
 // 撤銷則刪掉那個 client_id（= play_id）的打席與跑壘
 export function applySynced<A extends { id: string }, E extends RunnerEvent>(
@@ -307,6 +324,7 @@ export interface AtbatDraftInput {
   note: string;
   moves: RunnerMove[];
   label: string;
+  expectedLast?: ExpectedLast;
 }
 
 export function buildAtbatItem(input: AtbatDraftInput, clientId = newClientId(), now = new Date().toISOString()): AtbatQueueItem {
@@ -324,6 +342,7 @@ export function buildAtbatItem(input: AtbatDraftInput, clientId = newClientId(),
     note: input.note,
     runners: runnersPayload(input.moves),
   };
+  if (input.expectedLast) body.expected_last = input.expectedLast;
   // 預覽欄位和伺服器寫入時一樣經過 parseAtbatInput，畫面上的打數/打點才會一致
   const row = parseAtbatInput(body).row ?? {};
   const atbatId = `pending:${clientId}`;
@@ -350,7 +369,14 @@ export function buildAtbatItem(input: AtbatDraftInput, clientId = newClientId(),
 }
 
 export function buildPlayItem(
-  input: { gameId: string; inning: number; type: RunnerEventType; moves: RunnerMove[]; label: string },
+  input: {
+    gameId: string;
+    inning: number;
+    type: RunnerEventType;
+    moves: RunnerMove[];
+    label: string;
+    expectedLast?: ExpectedLast;
+  },
   clientId = newClientId(),
   now = new Date().toISOString()
 ): PlayQueueItem {
@@ -363,6 +389,7 @@ export function buildPlayItem(
       inning: input.inning,
       event_type: input.type,
       runners: runnersPayload(input.moves),
+      ...(input.expectedLast ? { expected_last: input.expectedLast } : {}),
     },
     preview: {
       events: previewEvents(input.gameId, clientId, input.inning, null, input.moves, null, input.type, now),

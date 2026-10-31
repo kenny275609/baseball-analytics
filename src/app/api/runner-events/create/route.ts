@@ -3,6 +3,8 @@ import { createClient } from '@/lib/supabase/server';
 import { authorize } from '@/lib/auth';
 import { isStandaloneType, isUuid, movedRunners, parseAllRunnerInputs } from '@/lib/baserunning';
 import { checkRunnersInDb } from '@/lib/basesServer';
+import { parseExpectedLast } from '@/lib/conflict';
+import { checkExpectedInDb } from '@/lib/conflictServer';
 import { findExistingPlay, isUniqueViolation, parseClientId } from '@/lib/idempotency';
 import { isMissingTable, syncGameScore } from '@/lib/score';
 
@@ -32,6 +34,25 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: '這筆紀錄的識別碼已被打席使用' }, { status: 409 });
       }
     }
+    // 衝突檢查：記錄當下畫面上的最後一筆必須仍是伺服器上的最後一筆（同一個 client_id 已寫入的重送在上面就回傳了）
+    const expected = parseExpectedLast(body.expected_last, isUuid);
+    if (expected === false) {
+      return NextResponse.json({ error: 'expected_last 格式錯誤' }, { status: 400 });
+    }
+    if (expected) {
+      const conflict = await checkExpectedInDb(supabase, body.game_id, expected);
+      if (!conflict.ok) {
+        // 檢查途中同一筆的另一個重送請求剛好寫入：當作重送成功
+        if (clientId) {
+          const existing = await findExistingPlay(supabase, body.game_id, clientId);
+          if (existing.kind === 'play') {
+            return NextResponse.json({ runner_events: existing.events, duplicate: true }, { status: 200 });
+          }
+        }
+        return NextResponse.json({ error: conflict.error, conflict: true }, { status: 409 });
+      }
+    }
+
     if (!isStandaloneType(body.event_type)) {
       return NextResponse.json({ error: '請選擇跑壘事件' }, { status: 400 });
     }

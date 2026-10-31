@@ -64,7 +64,8 @@ export default function GamesPage() {
       ) : (
         <div className="space-y-2">
           {games.map((g) => (
-            <Link key={g.id} href={`/games/${g.id}`} className="block">
+            // 進行中的比賽完整預先載入，比賽中斷網時從列表點進去也不用整頁重新載入
+            <Link key={g.id} href={`/games/${g.id}`} prefetch={g.status === 'live' ? true : null} className="block">
               <Card className="py-0 hover:bg-gray-50 transition-colors">
                 <CardContent className="py-4 flex items-center justify-between">
                   <div>
