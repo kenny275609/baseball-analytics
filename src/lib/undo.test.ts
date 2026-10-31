@@ -179,7 +179,7 @@ describe('撤銷後壘包、出局、比分回到前一個狀態', () => {
     for (;;) {
       const t = latestAction(a, e);
       if (!t) break;
-      order.push(t.kind === 'atbat' ? t.id : t.play_id);
+      order.push(t.kind === 'play' ? t.play_id : t.id);
       ({ atbats: a, events: e } = withoutTarget(a, e, t));
     }
     expect(order).toEqual(['a2', 'a1']);

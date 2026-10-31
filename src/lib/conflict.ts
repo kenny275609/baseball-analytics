@@ -6,12 +6,13 @@
 
 import { UndoRequest, sameTarget } from '@/lib/undo';
 
-// none = 記錄時這場比賽還沒有任何紀錄；
+// none = 記錄時這場比賽還沒有任何紀錄；sub = 前一筆是換人；
 // client = 前一筆是同一支手機上還在排隊的紀錄，以它的 client_id（= play_id）找伺服器上的紀錄
 export type ExpectedLast =
   | { kind: 'none' }
   | { kind: 'atbat'; id: string }
   | { kind: 'play'; play_id: string }
+  | { kind: 'sub'; id: string }
   | { kind: 'client'; client_id: string };
 
 // undefined = 沒帶（舊版前端），不檢查；格式錯誤回傳 false
@@ -22,6 +23,7 @@ export function parseExpectedLast(value: unknown, isId: (v: unknown) => v is str
   if (v.kind === 'none') return { kind: 'none' };
   if (v.kind === 'atbat' && isId(v.id)) return { kind: 'atbat', id: v.id };
   if (v.kind === 'play' && isId(v.play_id)) return { kind: 'play', play_id: v.play_id };
+  if (v.kind === 'sub' && isId(v.id)) return { kind: 'sub', id: v.id };
   if (v.kind === 'client' && isId(v.client_id)) return { kind: 'client', client_id: v.client_id };
   return false;
 }

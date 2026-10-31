@@ -225,17 +225,20 @@ export function mergePending<A extends { id: string }, E extends RunnerEvent>(
 
 // 新紀錄送出時帶給伺服器的「前一筆」：佇列裡還有動作就是最後一筆排隊中的動作，
 // 否則是伺服器資料（扣掉待送出撤銷的紀錄）裡最後一筆。伺服器上的最後一筆不是它就回 409
+// 換人（subs）只能在線上、佇列清空時記錄，所以只會出現在伺服器資料裡
 export function expectedLastFor<A extends { id: string; created_at: string }, E extends RunnerEvent>(
   atbats: A[],
   events: E[],
-  queue: QueueItem[]
+  queue: QueueItem[],
+  subs: { id: string; created_at: string }[] = []
 ): ExpectedLast {
   const pending = latestPending(queue);
   if (pending) return { kind: 'client', client_id: pending.clientId };
   const merged = mergePending(atbats, events, queue) as { atbats: A[]; events: E[] };
-  const latest = latestAction(merged.atbats, merged.events);
+  const latest = latestAction(merged.atbats, merged.events, subs);
   if (!latest) return { kind: 'none' };
-  return latest.kind === 'atbat' ? { kind: 'atbat', id: latest.id } : { kind: 'play', play_id: latest.play_id };
+  if (latest.kind === 'play') return { kind: 'play', play_id: latest.play_id };
+  return { kind: latest.kind, id: latest.id };
 }
 
 // 一筆佇列動作同步成功後，把伺服器回傳的打席/跑壘接到伺服器資料上（已存在的 id 不重複加）；

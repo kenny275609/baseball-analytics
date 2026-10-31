@@ -82,11 +82,57 @@ function groupByPlay<T extends Pick<RunnerEvent, 'play_id'>>(events: T[]): T[][]
 export type BaseReplayEvent = Pick<
   RunnerEvent,
   'play_id' | 'inning' | 'runner_player_id' | 'from_base' | 'to_base' | 'players'
->;
+> & { created_at?: string };
 
-export function computeBases(events: BaseReplayEvent[], inning: number): Bases {
+// 代跑（game_substitutions 的 pinch_runner）：在換人的時間點把壘上的原跑者換成代跑者，
+// 之後的跑壘事件就是代跑者在跑
+export interface RunnerSubReplay {
+  inning: number | null;
+  base: number | null;
+  out_player_id: string | null;
+  in_player_id: string | null;
+  in_player?: RunnerPlayerRef | null;
+  created_at: string;
+}
+
+// timestamptz 轉成微秒（和 undo.ts 的 timeKey 相同，避免互相 import）
+function replayTime(at: string | undefined): number {
+  if (!at) return 0;
+  const ms = Date.parse(at);
+  if (Number.isNaN(ms)) return 0;
+  const frac = /\.(\d+)/.exec(at)?.[1] ?? '';
+  return ms * 1000 + Number(frac.slice(3, 6).padEnd(3, '0'));
+}
+
+function applyRunnerSub(bases: Bases, sub: RunnerSubReplay) {
+  if (!sub.in_player_id) return;
+  const runner: Runner = { playerId: sub.in_player_id, player: sub.in_player ?? null };
+  const b = sub.base;
+  if (b !== null && b >= 1 && b <= 3 && bases[b] && bases[b]!.playerId === sub.out_player_id) {
+    bases[b] = runner;
+    return;
+  }
+  // 記錄的壘包對不上（例如中間的紀錄被刪除重記）：改用球員找
+  for (const x of [1, 2, 3] as const) {
+    if (sub.out_player_id && bases[x]?.playerId === sub.out_player_id) {
+      bases[x] = runner;
+      return;
+    }
+  }
+}
+
+export function computeBases(events: BaseReplayEvent[], inning: number, runnerSubs: RunnerSubReplay[] = []): Bases {
   const bases: Bases = [null, null, null, null];
+  const subs = runnerSubs
+    .filter((s) => s.inning === inning)
+    .sort((a, b) => replayTime(a.created_at) - replayTime(b.created_at));
+  let nextSub = 0;
   for (const play of groupByPlay(events.filter((e) => e.inning === inning))) {
+    // 這個 play 之前做的代跑先換上
+    const playTime = replayTime(play[0].created_at);
+    while (nextSub < subs.length && replayTime(subs[nextSub].created_at) < playTime) {
+      applyRunnerSub(bases, subs[nextSub++]);
+    }
     // 先把所有跑者從原壘拿起來再放下，前後順序才不會互相覆蓋（一壘→二壘、二壘→三壘）
     for (const e of play) {
       if (e.from_base >= 1 && e.from_base <= 3) bases[e.from_base] = null;
@@ -103,6 +149,7 @@ export function computeBases(events: BaseReplayEvent[], inning: number): Bases {
       }
     }
   }
+  while (nextSub < subs.length) applyRunnerSub(bases, subs[nextSub++]);
   return bases;
 }
 

@@ -4,9 +4,9 @@ import { ExpectedLast, checkExpected } from '@/lib/conflict';
 import { isMissingTable } from '@/lib/score';
 import { UndoRequest, latestAction } from '@/lib/undo';
 
-// 最後一個打席 vs 最後一個非打擊跑壘
+// 最後一個打席 vs 最後一個非打擊跑壘 vs 最後一次換人
 export async function findLatest(supabase: SupabaseClient, gameId: string) {
-  const [atbatRes, playRes] = await Promise.all([
+  const [atbatRes, playRes, subRes] = await Promise.all([
     supabase
       .from('atbats')
       .select('id, created_at')
@@ -22,10 +22,23 @@ export async function findLatest(supabase: SupabaseClient, gameId: string) {
       .order('created_at', { ascending: false })
       .order('id', { ascending: false })
       .limit(1),
+    supabase
+      .from('game_substitutions')
+      .select('id, created_at')
+      .eq('game_id', gameId)
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: false })
+      .limit(1),
   ]);
   if (atbatRes.error) throw atbatRes.error;
   if (playRes.error && !isMissingTable(playRes.error)) throw playRes.error;
-  return latestAction(atbatRes.data ?? [], playRes.error ? [] : playRes.data ?? []);
+  // 換人的 migration 還沒執行：當作沒有換人紀錄
+  if (subRes.error && !isMissingTable(subRes.error)) throw subRes.error;
+  return latestAction(
+    atbatRes.data ?? [],
+    playRes.error ? [] : playRes.data ?? [],
+    subRes.error ? [] : subRes.data ?? []
+  );
 }
 
 // client_id（= play_id）寫入的是打席還是非打擊跑壘

@@ -163,11 +163,11 @@ describe('expectedLastFor（前端記錄當下的前一筆）', () => {
   });
 });
 
-// 依資料表依序回傳結果的假 supabase
+// 依資料表依序回傳結果的假 supabase（沒指定的資料表回傳空資料，例如沒有換人紀錄）
 function mockClient(results: Record<string, { data: unknown; error: { code?: string } | null }[]>) {
   const client = {
     from: (table: string) => {
-      const result = results[table].shift();
+      const result = results[table]?.shift() ?? { data: [], error: null };
       const builder: Record<string, unknown> = {};
       for (const method of ['select', 'eq', 'order', 'is', 'limit']) builder[method] = () => builder;
       builder.then = (resolve: (v: unknown) => unknown) => Promise.resolve(result).then(resolve);

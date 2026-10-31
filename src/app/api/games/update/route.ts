@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { authorize } from '@/lib/auth';
 
-// 更新比賽資訊，或替換某個棒次的球員（代打/換人）
+// 更新比賽資訊（狀態、對手、比分…）
 export async function POST(request: Request) {
   try {
     const auth = await authorize(['editor', 'admin']);
@@ -15,16 +15,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'ID is required' }, { status: 400 });
     }
 
+    // 換人改由 /api/games/substitute（保留換人紀錄），這裡不再直接覆寫打序
     if (body.lineup_slot) {
-      const { batting_order, player_id } = body.lineup_slot;
-      const order = Number(batting_order);
-      if (!player_id || !Number.isInteger(order) || order < 1 || order > 20) {
-        return NextResponse.json({ error: '棒次資料錯誤' }, { status: 400 });
-      }
-      const { error } = await supabase
-        .from('game_lineups')
-        .upsert({ game_id: id, batting_order: order, player_id });
-      if (error) throw error;
+      return NextResponse.json({ error: '請使用比賽頁的「換人」功能' }, { status: 400 });
     }
 
     const updates: Record<string, unknown> = {};

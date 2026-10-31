@@ -5,11 +5,12 @@ import { findLatest } from '@/lib/conflictServer';
 import { isUuid } from '@/lib/baserunning';
 import { parseClientId } from '@/lib/idempotency';
 import { isMissingTable, syncGameScore } from '@/lib/score';
+import { undoSubstitution } from '@/lib/substitutionServer';
 import { UndoRequest, parseUndoRequest, sameTarget } from '@/lib/undo';
 
 // 撤銷上一步：
-//   { game_id, target: { kind: 'atbat', id } | { kind: 'play', play_id } }
-//     刪除這場比賽最後一筆打席（連同它的跑壘）或最後一個非打擊跑壘 play。
+//   { game_id, target: { kind: 'atbat', id } | { kind: 'play', play_id } | { kind: 'sub', id } }
+//     刪除這場比賽最後一筆打席（連同它的跑壘）、最後一個非打擊跑壘 play，或撤銷最後一次換人（打序還原）。
 //     target 必須仍是資料庫裡最新的一筆，否則回 409（例如另一支手機剛記錄），請前端重新確認
 //   { game_id, client_id }
 //     離線佇列送來的撤銷：刪除這個 client_id（= play_id）寫入的紀錄，沒有就當作成功（可重送）；
@@ -86,6 +87,12 @@ export async function POST(request: Request) {
         { error: '最後一筆紀錄已經改變（可能是其他裝置剛記錄），請重新確認要撤銷哪一筆' },
         { status: 409 }
       );
+    }
+
+    if (latest.kind === 'sub') {
+      const undone = await undoSubstitution(supabase, gameId, latest.id);
+      if (!undone.ok) return NextResponse.json({ error: undone.error }, { status: undone.status });
+      return NextResponse.json({ success: true, undone: latest }, { status: 200 });
     }
 
     const { data: deleted, error } =

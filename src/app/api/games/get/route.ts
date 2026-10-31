@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { authorize } from '@/lib/auth';
 import { isMissingTable } from '@/lib/score';
+import { SUB_SELECT } from '@/lib/substitutionServer';
 
 export async function GET(request: Request) {
   try {
@@ -14,7 +15,7 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: 'ID is required' }, { status: 400 });
     }
 
-    const [gameRes, lineupRes, atbatsRes, eventsRes, inningsRes] = await Promise.all([
+    const [gameRes, lineupRes, atbatsRes, eventsRes, inningsRes, subsRes] = await Promise.all([
       supabase.from('games').select('*').eq('id', id).single(),
       supabase
         .from('game_lineups')
@@ -35,6 +36,7 @@ export async function GET(request: Request) {
         .order('created_at')
         .order('id'),
       supabase.from('game_innings').select('inning, opp_runs').eq('game_id', id).order('inning'),
+      supabase.from('game_substitutions').select(SUB_SELECT).eq('game_id', id).order('created_at').order('id'),
     ]);
 
     if (gameRes.error) {
@@ -48,6 +50,8 @@ export async function GET(request: Request) {
     // migration 還沒執行時當作沒有跑壘資料，頁面照常顯示
     if (eventsRes.error && !isMissingTable(eventsRes.error)) throw eventsRes.error;
     if (inningsRes.error && !isMissingTable(inningsRes.error)) throw inningsRes.error;
+    // 換人的 migration 還沒執行（或讀取失敗）：比賽頁照常顯示，只是停用換人並提示
+    if (subsRes.error && !isMissingTable(subsRes.error)) console.error('Error fetching substitutions:', subsRes.error);
 
     return NextResponse.json(
       {
@@ -56,6 +60,8 @@ export async function GET(request: Request) {
         atbats: atbatsRes.data,
         runner_events: eventsRes.data ?? [],
         innings: inningsRes.data ?? [],
+        substitutions: subsRes.error ? [] : subsRes.data ?? [],
+        substitutions_ready: !subsRes.error,
       },
       { status: 200 }
     );

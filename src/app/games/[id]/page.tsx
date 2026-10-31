@@ -4,13 +4,14 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardAction, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { AtbatDraft, AtbatEntry, EMPTY_DRAFT } from '@/components/AtbatEntry';
 import { BaseDiamond } from '@/components/BaseDiamond';
 import { AtbatRunnersDialog, StandaloneRunnerDialog } from '@/components/RunnerDialogs';
+import { SubstitutionDialog, SubstitutionRequest } from '@/components/SubstitutionDialog';
 import { Scoreboard } from '@/components/Scoreboard';
 import { SprayChart } from '@/components/SprayChart';
 import { useSession } from '@/lib/useSession';
@@ -47,6 +48,7 @@ import {
   expectedLastFor,
   isPendingId,
   mergePending,
+  newClientId,
   readQueue,
   removeItem,
   undoLatestPending,
@@ -63,6 +65,15 @@ import {
 } from '@/lib/offlineSync';
 import { UndoTarget, latestAction, sameTarget, timeKey } from '@/lib/undo';
 import { readCachedGame, saveCachedGame } from '@/lib/gameCache';
+import {
+  SubType,
+  Substitution,
+  battingOrders,
+  boxScoreRows,
+  formerBySlot,
+  inningLabel,
+  subTypeLabel,
+} from '@/lib/substitution';
 
 interface PlayerRef {
   name: string;
@@ -112,7 +123,22 @@ interface InningScore {
 const FROM_SHORT = ['打者', '一壘', '二壘', '三壘'];
 
 function nextState(atbats: Atbat[], events: RunnerEvent[], lineup: LineupSlot[]) {
-  return nextTurn(atbats, events, lineup.map((l) => l.batting_order));
+  return nextTurn(atbats, events, battingOrders(lineup));
+}
+
+// 換人的描述，例如「3 局上 第 5 棒 代打：李四（換下 王小明）」
+function describeSub(s: Substitution) {
+  const when = inningLabel(s.inning, s.half);
+  const prefix = when ? `${when} ` : '';
+  if (s.sub_type === 'add_slot') return `${prefix}新增第 ${s.batting_order} 棒：${playerLabel(s.in_player ?? null)}`;
+  const where = s.sub_type === 'pinch_runner' && s.base ? `（${['', '一壘', '二壘', '三壘'][s.base]}）` : '';
+  return `${prefix}第 ${s.batting_order} 棒 ${subTypeLabel(s.sub_type)}${where}：${playerLabel(s.in_player ?? null)}（換下 ${playerLabel(s.out_player ?? null)}）`;
+}
+
+function formatTime(at: string) {
+  const d = new Date(at);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
 function playerLabel(p: PlayerRef | null) {
@@ -138,7 +164,11 @@ function describePlay(events: RunnerEvent[]) {
   return `${first.inning} 局 ${standaloneLabel(first.event_type)}（${events.map(describeMove).join('、')}）`;
 }
 
-function describeTarget(target: UndoTarget, atbats: Atbat[], events: RunnerEvent[]) {
+function describeTarget(target: UndoTarget, atbats: Atbat[], events: RunnerEvent[], subs: Substitution[]) {
+  if (target.kind === 'sub') {
+    const sub = subs.find((x) => x.id === target.id);
+    return sub ? `換人 ${describeSub(sub)}` : '換人';
+  }
   if (target.kind === 'play') return describePlay(events.filter((e) => e.play_id === target.play_id));
   const atbat = atbats.find((a) => a.id === target.id);
   return atbat ? describeAtbat(atbat, events.filter((e) => e.atbat_id === atbat.id)) : '打席';
@@ -150,6 +180,9 @@ interface GameData {
   atbats: Atbat[];
   runner_events: RunnerEvent[];
   innings: InningScore[];
+  substitutions?: Substitution[];
+  // false = 換人的 migration 還沒執行
+  substitutions_ready?: boolean;
 }
 
 function PendingTag() {
@@ -179,6 +212,8 @@ export default function GamePage() {
   const [serverAtbats, setAtbats] = useState<Atbat[]>([]);
   const [serverEvents, setRunnerEvents] = useState<RunnerEvent[]>([]);
   const [undoing, setUndoing] = useState(false);
+  const [subs, setSubs] = useState<Substitution[]>([]);
+  const [subsReady, setSubsReady] = useState(false);
   const [innings, setInnings] = useState<InningScore[]>([]);
   const [players, setPlayers] = useState<Player[]>([]);
   const [loading, setLoading] = useState(true);
@@ -191,7 +226,10 @@ export default function GamePage() {
   const [inning, setInning] = useState(1);
   const [draft, setDraft] = useState<AtbatDraft>(EMPTY_DRAFT);
   const [saving, setSaving] = useState(false);
-  const [subbing, setSubbing] = useState(false);
+  // 換人對話框：clientId 在開啟時產生，同一次換人重按（逾時重送）不會重複寫入
+  const [subDialog, setSubDialog] = useState<{ key: number; type: SubType; clientId: string } | null>(null);
+  const [subSaving, setSubSaving] = useState(false);
+  const [subError, setSubError] = useState('');
   const [ourScore, setOurScore] = useState('');
   const [oppScore, setOppScore] = useState('');
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -204,11 +242,13 @@ export default function GamePage() {
   const atbatsRef = useRef<Atbat[]>([]);
   const lineupRef = useRef<LineupSlot[]>([]);
   const eventsRef = useRef<RunnerEvent[]>([]);
+  const subsRef = useRef<Substitution[]>([]);
   useEffect(() => {
     atbatsRef.current = serverAtbats;
     lineupRef.current = lineup;
     eventsRef.current = serverEvents;
-  }, [serverAtbats, lineup, serverEvents]);
+    subsRef.current = subs;
+  }, [serverAtbats, lineup, serverEvents, subs]);
 
   // 伺服器資料 + 這支手機上還沒同步的紀錄（每次都重新讀佇列，拿最新的）
   const mergedNow = useCallback(
@@ -258,6 +298,7 @@ export default function GamePage() {
       }
       data.runner_events = data.runner_events ?? [];
       data.innings = data.innings ?? [];
+      data.substitutions = data.substitutions ?? [];
       for (const entry of missed) {
         const applied = applySynced(data.atbats, data.runner_events, entry.item, entry.data);
         data.atbats = applied.atbats;
@@ -269,6 +310,10 @@ export default function GamePage() {
       atbatsRef.current = data.atbats;
       eventsRef.current = data.runner_events;
       lineupRef.current = data.lineup;
+      subsRef.current = data.substitutions;
+      setSubs(data.substitutions);
+      // 離線用快取打開時不知道伺服器狀態，反正也不能換人
+      setSubsReady(!fromCache && data.substitutions_ready === true);
       setGame(data.game);
       setLineup(data.lineup);
       setAtbats(data.atbats);
@@ -365,7 +410,8 @@ export default function GamePage() {
   };
   const blockedItem = pending[0]?.error ? pending[0] : null;
   const currentSlot = lineup.find((l) => l.batting_order === slot);
-  const bases = computeBases(runnerEvents, inning);
+  const runnerSubs = subs.filter((x) => x.sub_type === 'pinch_runner');
+  const bases = computeBases(runnerEvents, inning, runnerSubs);
   const hasRunners = bases.some(Boolean);
   const outsThisInning = outsInInning(atbats, runnerEvents, inning);
   const recording = canEdit && game?.status === 'live';
@@ -459,7 +505,7 @@ export default function GamePage() {
       note: draft.note,
       moves,
       label: '',
-      expectedLast: expectedLastFor(atbatsRef.current, eventsRef.current, readQueue(queueStorage(), gameId)),
+      expectedLast: expectedLastFor(atbatsRef.current, eventsRef.current, readQueue(queueStorage(), gameId), subsRef.current),
     });
     item.label = describeAtbat(item.preview.atbat, item.preview.events);
     if (!(await submit(item))) return;
@@ -480,7 +526,7 @@ export default function GamePage() {
       type,
       moves,
       label: '',
-      expectedLast: expectedLastFor(atbatsRef.current, eventsRef.current, readQueue(queueStorage(), gameId)),
+      expectedLast: expectedLastFor(atbatsRef.current, eventsRef.current, readQueue(queueStorage(), gameId), subsRef.current),
     });
     item.label = describePlay(item.preview.events);
     if (!(await submit(item))) return;
@@ -494,7 +540,7 @@ export default function GamePage() {
   //   還有沒同步的紀錄 → 撤銷這支手機上最後一筆（不用網路）
   //   否則先重新載入，以伺服器上真正最後一筆為準（可能是其他手機記的），確認後請伺服器刪除
   const undoLast = async () => {
-    if (undoing || saving) return;
+    if (undoing || saving || subSaving) return;
     setError('');
     const storage = queueStorage();
     const queue = readQueue(storage, gameId);
@@ -521,18 +567,22 @@ export default function GamePage() {
     }
     setUndoing(true);
     try {
-      const before = latestAction(atbatsRef.current, eventsRef.current);
+      const before = latestAction(atbatsRef.current, eventsRef.current, subsRef.current);
       const data = await load(false);
       if (!data) return;
-      const target = latestAction(data.atbats, data.runner_events);
+      const dataSubs = data.substitutions ?? [];
+      const target = latestAction(data.atbats, data.runner_events, dataSubs);
       if (!target) {
         setError('沒有可撤銷的紀錄');
         return;
       }
       const other = sameTarget(before, target) ? '' : '\n（這筆是其他裝置剛記錄的，畫面已更新）';
-      const desc = describeTarget(target, data.atbats, data.runner_events);
-      if (!window.confirm(`撤銷上一步：\n${desc}${other}\n\n壘包、出局數與比分會回到這筆之前的狀態。`)) return;
-      const request = target.kind === 'atbat' ? { kind: 'atbat', id: target.id } : { kind: 'play', play_id: target.play_id };
+      const desc = describeTarget(target, data.atbats, data.runner_events, dataSubs);
+      const effect =
+        target.kind === 'sub' ? '打序會還原成換人之前（已記錄的打席不受影響）。' : '壘包、出局數與比分會回到這筆之前的狀態。';
+      if (!window.confirm(`撤銷上一步：\n${desc}${other}\n\n${effect}`)) return;
+      const request =
+        target.kind === 'play' ? { kind: 'play', play_id: target.play_id } : { kind: target.kind, id: target.id };
       const res = await fetch('/api/games/undo', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -677,16 +727,68 @@ export default function GamePage() {
     return result;
   };
 
-  const substitute = async (playerId: string) => {
-    setSubbing(false);
-    if (!playerId) return;
-    const res = await fetch('/api/games/update', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: gameId, lineup_slot: { batting_order: slot, player_id: playerId } }),
-    });
-    if (!res.ok) setError('換人失敗');
-    await load(false);
+  // 換人只在線上、而且這支手機沒有未同步紀錄時進行：
+  // 換人會改變打序（之後的打者、代跑的壘上跑者），必須先和伺服器確認目前的打序/壘包，
+  // 不排進離線佇列（被拒絕時後面所有依新打序記的打席都得捨棄）
+  const subBlockedReason = (): string | null => {
+    if (!subsReady) {
+      return stale || !isOnline()
+        ? '目前離線：換人需要連上網路，連線後再換人；打席照常可以離線記錄'
+        : '換人功能尚未啟用：需要先在 Supabase 執行 migration 20261103000000_game_substitutions.sql';
+    }
+    if (stale || !isOnline()) return '目前離線：換人會改變打序，需要連上網路和伺服器確認後才能換；打席照常可以離線記錄';
+    if (pending.length > 0) return `還有 ${pending.length} 筆紀錄尚未同步，同步完成後才能換人（換人要接在這些紀錄之後）`;
+    if (players.length === 0) return '球員名單還沒載入，請確認網路後重新整理';
+    return null;
+  };
+
+  const openSub = (type: SubType) => {
+    const reason = subBlockedReason();
+    if (reason) {
+      setError(reason);
+      return;
+    }
+    setError('');
+    setSubError('');
+    dialogSeq.current += 1;
+    setSubDialog({ key: dialogSeq.current, type, clientId: newClientId() });
+  };
+
+  const saveSub = async (req: SubstitutionRequest) => {
+    if (!subDialog || subSaving) return;
+    if (readQueue(queueStorage(), gameId).length > 0) {
+      setSubError('還有紀錄尚未同步，同步完成後才能換人');
+      return;
+    }
+    setSubSaving(true);
+    setSubError('');
+    try {
+      const res = await fetch('/api/games/substitute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...req, game_id: gameId, client_id: subDialog.clientId }),
+        signal: AbortSignal.timeout?.(15000),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setSubError(data.error || '換人失敗');
+        // 打序/壘包已被其他裝置更動：載入最新資料，對話框裡的選項跟著更新
+        if (res.status === 409) await load(false, true);
+        return;
+      }
+      const fresh = await load(false);
+      setSubDialog(null);
+      // 加棒次會改變輪轉（例如打完第 9 棒改輪到第 10 棒）
+      if (fresh && req.sub_type === 'add_slot') {
+        const merged = mergedNow();
+        const next = nextState(merged.atbats, merged.events, fresh.lineup);
+        setSlot(next.slot);
+      }
+    } catch {
+      setSubError('網路連線失敗，換人可能沒有完成；請確認連線後再按一次（不會重複換人）');
+    } finally {
+      setSubSaving(false);
+    }
   };
 
   const updateGame = async (updates: Record<string, unknown>) => {
@@ -717,13 +819,10 @@ export default function GamePage() {
     return <div className="text-center py-12 text-red-600">{error || '找不到這場比賽'}</div>;
   }
 
-  // 本場個人成績：打序上的人 + 打過但已被換下的人
-  const boxPlayerIds = [
-    ...lineup.map((l) => l.player_id),
-    ...atbats.map((a) => a.player_id),
-  ].filter((id, i, arr) => arr.indexOf(id) === i);
-  const nameOf = (id: string) =>
-    lineup.find((l) => l.player_id === id)?.players ?? atbats.find((a) => a.player_id === id)?.players ?? null;
+  // 本場個人成績：依棒次列出目前的球員和已被換下的球員（成績依打席當時的打者計算）
+  const boxRows = boxScoreRows(lineup, subs, atbats);
+  const former = formerBySlot(subs);
+  const formerIds = new Set(subs.map((x) => x.out_player_id).filter((id): id is string => !!id));
 
   // 記分板：有跑壘資料的比賽我方逐局得分由事件推算，舊比賽只有手動總分
   const tracked = isTracked(atbats, runnerEvents);
@@ -741,7 +840,8 @@ export default function GamePage() {
   // 打席紀錄：同一局內打席和非打擊跑壘依時間排列（新的在上）
   type LogItem =
     | { kind: 'atbat'; at: string; atbat: Atbat }
-    | { kind: 'play'; at: string; playId: string; events: RunnerEvent[] };
+    | { kind: 'play'; at: string; playId: string; events: RunnerEvent[] }
+    | { kind: 'sub'; at: string; sub: Substitution };
   const eventsByAtbat = new Map<string, RunnerEvent[]>();
   const plays = new Map<string, RunnerEvent[]>();
   for (const e of runnerEvents) {
@@ -754,6 +854,7 @@ export default function GamePage() {
   for (const [playId, events] of plays) {
     pushItem(events[0].inning, { kind: 'play', at: events[0].created_at, playId, events });
   }
+  for (const sub of subs) pushItem(sub.inning ?? 0, { kind: 'sub', at: sub.created_at, sub });
   // 暫存紀錄（toISOString）和伺服器的 timestamptz 寫法不同，不能直接比字串
   for (const items of byInning.values()) items.sort((x, y) => timeKey(y.at) - timeKey(x.at));
   const logInnings = [...byInning.keys()].sort((a, b) => b - a);
@@ -863,7 +964,7 @@ export default function GamePage() {
                     <Button
                       variant="outline"
                       className="h-11"
-                      disabled={saving || undoing || (atbats.length === 0 && runnerEvents.length === 0)}
+                      disabled={saving || undoing || subSaving || (atbats.length === 0 && runnerEvents.length === 0 && subs.length === 0)}
                       onClick={undoLast}
                     >
                       {undoing ? '撤銷中…' : '撤銷上一步'}
@@ -911,33 +1012,32 @@ export default function GamePage() {
                 >
                   <div className="text-[11px] opacity-70">第 {l.batting_order} 棒</div>
                   <div className="text-sm font-semibold whitespace-nowrap">{l.players?.name ?? '—'}</div>
+                  {(former.get(l.batting_order) ?? []).length > 0 && (
+                    // 這一棒已被換下的球員（灰色刪除線）
+                    <div className="max-w-[7rem] truncate text-[11px] line-through opacity-60">
+                      {(former.get(l.batting_order) ?? []).map((f) => f.player?.name ?? '—').join('、')}
+                    </div>
+                  )}
                 </button>
               ))}
+              <button
+                type="button"
+                onClick={() => openSub('add_slot')}
+                className="shrink-0 rounded-lg border-2 border-dashed border-gray-300 px-3 py-1.5 text-sm text-gray-600"
+                aria-label="新增棒次"
+              >
+                ＋棒次
+              </button>
             </div>
 
-            <div className="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2">
-              <div>
+            <div className="flex items-center justify-between gap-2 rounded-lg bg-gray-50 px-3 py-2">
+              <div className="min-w-0">
                 <div className="text-xs text-gray-500">打擊中 · 第 {slot} 棒</div>
-                <div className="text-lg font-bold">{playerLabel(currentSlot?.players ?? null)}</div>
+                <div className="text-lg font-bold truncate">{playerLabel(currentSlot?.players ?? null)}</div>
               </div>
-              {subbing ? (
-                <select
-                  autoFocus
-                  className="border rounded-md px-2 py-1 text-base md:text-sm"
-                  defaultValue=""
-                  onChange={(e) => substitute(e.target.value)}
-                  onBlur={() => setSubbing(false)}
-                >
-                  <option value="" disabled>選擇代打/替補</option>
-                  {players
-                    .filter((p) => !lineup.some((l) => l.player_id === p.id))
-                    .map((p) => (
-                      <option key={p.id} value={p.id}>{playerLabel(p)}</option>
-                    ))}
-                </select>
-              ) : (
-                <Button variant="outline" size="sm" onClick={() => setSubbing(true)}>換人</Button>
-              )}
+              <Button variant="outline" size="sm" className="h-10 shrink-0" disabled={subSaving} onClick={() => openSub('pinch_hitter')}>
+                換人
+              </Button>
             </div>
 
             <AtbatEntry draft={draft} onChange={setDraft} showRbi={false} />
@@ -1005,16 +1105,46 @@ export default function GamePage() {
         />
       )}
 
+      {subDialog && game && (
+        <SubstitutionDialog
+          key={subDialog.key}
+          open
+          onOpenChange={(open) => !open && !subSaving && setSubDialog(null)}
+          initialType={subDialog.type}
+          lineup={lineup}
+          bases={bases}
+          currentSlot={slot}
+          inning={inning}
+          homeAway={game.home_away}
+          players={players}
+          formerIds={formerIds}
+          saving={subSaving}
+          error={subError}
+          onConfirm={saveSub}
+        />
+      )}
+
       {/* 打席紀錄 */}
       <Card className="gap-3">
         <CardHeader><CardTitle>打席紀錄（{countPlateAppearances(atbats)}）</CardTitle></CardHeader>
         <CardContent className="space-y-3">
-          {atbats.length === 0 && plays.size === 0 && <p className="text-sm text-gray-500">尚無打席</p>}
+          {atbats.length === 0 && plays.size === 0 && subs.length === 0 && <p className="text-sm text-gray-500">尚無打席</p>}
           {logInnings.map((inn) => (
             <div key={inn}>
               <div className="text-xs font-semibold text-gray-500 mb-1">{inn ? `${inn} 局` : '未標局數'}</div>
               <ul className="divide-y rounded-md border">
                 {byInning.get(inn)!.map((item) => {
+                  if (item.kind === 'sub') {
+                    return (
+                      <li key={item.sub.id} className="flex items-center gap-2 pl-3 pr-1 py-1.5 text-sm bg-sky-50">
+                        <span className="w-4 shrink-0 text-sky-700">⇄</span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block font-semibold">{subTypeLabel(item.sub.sub_type)}</span>
+                          <span className="block text-xs text-gray-600">{describeSub(item.sub)}</span>
+                        </span>
+                      </li>
+                    );
+                  }
                   if (item.kind === 'play') {
                     const label = standaloneLabel(item.events[0].event_type);
                     const unsynced = isPendingId(item.events[0].id);
@@ -1078,6 +1208,43 @@ export default function GamePage() {
         </CardContent>
       </Card>
 
+      {/* 打序：每一棒目前的球員，已被換下的球員灰色顯示 */}
+      {lineup.length > 0 && (
+        <Card className="gap-3">
+          <CardHeader>
+            <CardTitle>打序與換人</CardTitle>
+            {recording && (
+              <CardAction>
+                <Button variant="outline" size="sm" className="h-10" disabled={subSaving} onClick={() => openSub('replace')}>
+                  換人／加棒次
+                </Button>
+              </CardAction>
+            )}
+          </CardHeader>
+          <CardContent>
+            <ol className="divide-y rounded-md border">
+              {lineup.map((l) => (
+                <li key={l.batting_order} className="flex gap-2 px-3 py-1.5 text-sm">
+                  <span className="w-5 shrink-0 text-right tabular-nums text-gray-400">{l.batting_order}</span>
+                  <span className="min-w-0 flex-1">
+                    {(former.get(l.batting_order) ?? []).map((f) => (
+                      <span key={f.sub.id} className="block text-xs text-gray-400">
+                        <span className="line-through">{playerLabel(f.player)}</span>
+                        <span className="ml-1">
+                          {inningLabel(f.sub.inning, f.sub.half)} {subTypeLabel(f.sub.sub_type)}換下
+                          {formatTime(f.sub.created_at) && ` · ${formatTime(f.sub.created_at)}`}
+                        </span>
+                      </span>
+                    ))}
+                    <span className="block font-semibold truncate">{playerLabel(l.players)}</span>
+                  </span>
+                </li>
+              ))}
+            </ol>
+          </CardContent>
+        </Card>
+      )}
+
       {/* 本場成績 */}
       {atbats.length > 0 && (
         <Card className="gap-3">
@@ -1096,12 +1263,15 @@ export default function GamePage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {boxPlayerIds.map((id) => {
+                {boxRows.map((row) => {
+                  const id = row.playerId;
                   const s = computeStats(atbats.filter((a) => a.player_id === id));
                   return (
-                    <TableRow key={id}>
+                    <TableRow key={id} className={row.current ? '' : 'text-gray-500'}>
                       <TableCell>
-                        <Link href={`/players/${id}`} className="hover:underline">{nameOf(id)?.name ?? '—'}</Link>
+                        <span className="mr-1 inline-block w-4 text-right text-xs text-gray-400 tabular-nums">{row.slot ?? ''}</span>
+                        <Link href={`/players/${id}`} className="hover:underline">{row.player?.name ?? '—'}</Link>
+                        {!row.current && row.slot !== null && <span className="ml-1 text-[11px] text-gray-400">退場</span>}
                       </TableCell>
                       <TableCell className="text-right tabular-nums">{s.pa}</TableCell>
                       <TableCell className="text-right tabular-nums">{s.ab}</TableCell>
