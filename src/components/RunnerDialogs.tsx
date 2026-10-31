@@ -19,6 +19,7 @@ import {
   STANDALONE_EVENTS,
   autoRbi,
   movesOuts,
+  sacrificeFlyError,
   standaloneDefaults,
   validateMoves,
 } from '@/lib/baserunning';
@@ -105,6 +106,12 @@ function OutsSummary({ moves, outsBefore }: { moves: RunnerMove[]; outsBefore: n
   );
 }
 
+// 儲存失敗（例如另一支手機剛記錄過、畫面過期）的訊息要顯示在對話框內，不然會被遮在後面
+function SaveError({ error }: { error?: string }) {
+  if (!error) return null;
+  return <div className="text-sm text-red-600 bg-red-50 p-3 rounded-md">{error}</div>;
+}
+
 // ============================================
 // 打席後：逐一詢問每位跑者去向 + 打點
 // ============================================
@@ -116,7 +123,10 @@ interface AtbatRunnersDialogProps {
   initialMoves: RunnerMove[];
   outsBefore: number;
   saving: boolean;
+  error?: string;
   onConfirm: (moves: RunnerMove[], rbi: number) => void;
+  // 高飛犧牲打沒有跑者得分時，改記飛球接殺
+  onSwitchToFlyout?: () => void;
 }
 
 // 每次開啟用 key 重新掛載，初始值直接從 props 帶入
@@ -127,12 +137,15 @@ export function AtbatRunnersDialog({
   initialMoves,
   outsBefore,
   saving,
+  error,
   onConfirm,
+  onSwitchToFlyout,
 }: AtbatRunnersDialogProps) {
   const [moves, setMoves] = useState(initialMoves);
   const [rbiOverride, setRbiOverride] = useState<number | null>(null);
   const rbi = rbiOverride ?? autoRbi(code, moves);
   const invalid = validateMoves(moves);
+  const sfError = sacrificeFlyError(code, moves);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -162,12 +175,23 @@ export function AtbatRunnersDialog({
 
         <OutsSummary moves={moves} outsBefore={outsBefore} />
         {invalid && <p className="text-sm text-red-600">{invalid}</p>}
+        {sfError && (
+          <div className="text-sm text-amber-700 space-y-2">
+            <p>{sfError}</p>
+            {onSwitchToFlyout && (
+              <Button type="button" variant="outline" className="h-11" onClick={onSwitchToFlyout} disabled={saving}>
+                改記飛球接殺
+              </Button>
+            )}
+          </div>
+        )}
+        <SaveError error={error} />
 
         <DialogFooter>
           <Button variant="outline" className="h-11" onClick={() => onOpenChange(false)} disabled={saving}>
             取消
           </Button>
-          <Button className="h-11" onClick={() => onConfirm(moves, rbi)} disabled={!!invalid || saving}>
+          <Button className="h-11" onClick={() => onConfirm(moves, rbi)} disabled={!!invalid || !!sfError || saving}>
             {saving ? '儲存中...' : '確認記錄'}
           </Button>
         </DialogFooter>
@@ -177,7 +201,7 @@ export function AtbatRunnersDialog({
 }
 
 // ============================================
-// 兩個打席之間：盜壘、暴投、捕逸、牽制…
+// 兩個打席之間：牽制出局、投手犯規、其他（壘球不能盜壘，不提供盜壘／暴投）
 // ============================================
 
 interface StandaloneRunnerDialogProps {
@@ -186,8 +210,12 @@ interface StandaloneRunnerDialogProps {
   bases: Bases;
   outsBefore: number;
   saving: boolean;
+  error?: string;
   onConfirm: (type: RunnerEventType, moves: RunnerMove[]) => void;
 }
+
+// 預設「其他」：跑者都留在原壘，由使用者自己選，不會誤記出局
+const DEFAULT_STANDALONE: RunnerEventType = 'other';
 
 export function StandaloneRunnerDialog({
   open,
@@ -195,10 +223,11 @@ export function StandaloneRunnerDialog({
   bases,
   outsBefore,
   saving,
+  error,
   onConfirm,
 }: StandaloneRunnerDialogProps) {
-  const [type, setType] = useState<RunnerEventType>('steal');
-  const [moves, setMoves] = useState(() => standaloneDefaults('steal', bases));
+  const [type, setType] = useState<RunnerEventType>(DEFAULT_STANDALONE);
+  const [moves, setMoves] = useState(() => standaloneDefaults(DEFAULT_STANDALONE, bases));
   const invalid = validateMoves(moves);
   const moved = moves.some((m) => m.to !== m.from);
 
@@ -212,16 +241,16 @@ export function StandaloneRunnerDialog({
       <DialogContent className="max-h-[90dvh] overflow-y-auto p-4 sm:p-6">
         <DialogHeader>
           <DialogTitle>跑壘事件</DialogTitle>
-          <DialogDescription>記錄打席之間的推進或出局</DialogDescription>
+          <DialogDescription>記錄打席之間的推進或出局（擊球後的推進請在打席的跑者去向記錄）</DialogDescription>
         </DialogHeader>
 
-        <div className="grid grid-cols-4 gap-2">
+        <div className="grid grid-cols-3 gap-2">
           {STANDALONE_EVENTS.map((e) => (
             <button
               key={e.type}
               type="button"
               onClick={() => pickType(e.type)}
-              className={`h-11 rounded-lg border-2 text-sm font-semibold ${
+              className={`h-11 rounded-lg border-2 px-1 text-xs sm:text-sm whitespace-nowrap font-semibold ${
                 type === e.type ? 'bg-primary border-primary text-primary-foreground' : 'bg-white border-gray-200'
               }`}
             >
@@ -234,6 +263,7 @@ export function StandaloneRunnerDialog({
 
         <OutsSummary moves={moves} outsBefore={outsBefore} />
         {invalid && <p className="text-sm text-red-600">{invalid}</p>}
+        <SaveError error={error} />
 
         <DialogFooter>
           <Button variant="outline" className="h-11" onClick={() => onOpenChange(false)} disabled={saving}>

@@ -5,7 +5,7 @@ import { isStandaloneType, isUuid, movedRunners, parseAllRunnerInputs } from '@/
 import { checkRunnersInDb } from '@/lib/basesServer';
 import { isMissingTable, syncGameScore } from '@/lib/score';
 
-// 兩個打席之間的跑壘（盜壘、暴投、捕逸、牽制…），同一次送出的跑者算同一個 play
+// 兩個打席之間的跑壘（牽制、投手犯規…；盜壘/暴投等舊類型仍接受），同一次送出的跑者算同一個 play
 export async function POST(request: Request) {
   try {
     const auth = await authorize(['editor', 'admin']);

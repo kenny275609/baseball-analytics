@@ -21,8 +21,9 @@ export async function checkRunnersInDb(
     .select('play_id, inning, runner_player_id, from_base, to_base')
     .eq('game_id', gameId)
     .eq('inning', inning)
-    // 和比賽頁（games/get）同樣依 created_at 重播
-    .order('created_at');
+    // 和比賽頁（games/get）同樣依 created_at 重播；時間相同時用 id 讓順序固定
+    .order('created_at')
+    .order('id');
   if (error) return isMissingTable(error) ? { kind: 'missing' } : { kind: 'failed', error };
   const invalid = checkRunnersOnBases(runners, computeBases(data ?? [], inning));
   return invalid ? { kind: 'invalid', error: invalid } : { kind: 'ok' };

@@ -130,14 +130,17 @@ export function computeStats(
 ): BattingStats {
   const count: Partial<Record<ResultCode, number>> = {};
   let rbi = 0;
+  let pa = 0;
   for (const a of atbats) {
+    // 和 countPlateAppearances 一致：沒有合法打擊結果的殘缺資料不算打席，也不算打數
     const code = fieldsToResult(a);
-    if (code) count[code] = (count[code] ?? 0) + 1;
+    if (!code) continue;
+    count[code] = (count[code] ?? 0) + 1;
+    pa += 1;
     rbi += a.rbi ?? 0;
   }
   const n = (c: ResultCode) => count[c] ?? 0;
 
-  const pa = atbats.length;
   const b1 = n('single');
   const b2 = n('double');
   const b3 = n('triple');
@@ -169,7 +172,7 @@ export function formatRate(value: number): string {
   return s.startsWith('0') ? s.slice(1) : s;
 }
 
-// 打席數：只算有打擊結果的打席；盜壘、暴投等非打擊跑壘記在 runner_events，不算打席
+// 打席數：只算有打擊結果的打席；牽制等非打擊跑壘記在 runner_events，不算打席
 export function countPlateAppearances(atbats: AtbatResultFields[]): number {
   return atbats.filter((a) => fieldsToResult(a) !== null).length;
 }

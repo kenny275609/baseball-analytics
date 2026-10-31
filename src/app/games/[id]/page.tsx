@@ -35,6 +35,7 @@ import {
   nextTurn,
   outsInInning,
   runsByInning,
+  sacrificeFlyError,
   standaloneLabel,
 } from '@/lib/baserunning';
 
@@ -192,7 +193,8 @@ export default function GamePage() {
 
   // 壘上有人：先逐一詢問跑者去向；壘上無人：打者落點依結果決定，直接記錄。
   // 壘上無人但結果的出局數和預設去向對不上（野選、雙殺…），或使用者要調整打者去向
-  // （不死三振、安打趁傳多跑一個壘）時，也打開對話框
+  // （不死三振、安打趁傳多跑一個壘）時，也打開對話框；
+  // 高飛犧牲打沒有跑者得分（例如壘上無人）也要打開，提示改記飛球接殺，不直接存成 SF
   const startSave = (adjust = false) => {
     if (!currentSlot || !draft.result) return;
     const moves = defaultMoves(
@@ -202,7 +204,8 @@ export default function GamePage() {
       outsThisInning
     );
     const mismatch = movesOuts(moves) !== (getResultOption(draft.result)?.outs ?? 0);
-    if (adjust || moves.length > 1 || mismatch) {
+    if (adjust || moves.length > 1 || mismatch || sacrificeFlyError(draft.result, moves)) {
+      setError('');
       dialogSeq.current += 1;
       setRunnersDialog({ key: dialogSeq.current, moves });
     } else {
@@ -277,7 +280,7 @@ export default function GamePage() {
       const nextEvents = [...eventsRef.current, ...created];
       eventsRef.current = nextEvents;
       setRunnerEvents((prev) => [...prev, ...created]);
-      // 盜壘失敗/牽制造成第三個出局就換局（打者不變）
+      // 牽制等跑壘事件造成第三個出局就換局（打者不變）
       setInning(nextState(atbatsRef.current, nextEvents, lineupRef.current).inning);
       setStandaloneKey(null);
     } catch (err) {
@@ -290,9 +293,9 @@ export default function GamePage() {
   const deleteAtbat = async (atbat: Atbat) => {
     const label = getResultOption(fieldsToResult(atbat))?.label ?? '';
     if (deletingId) return;
-    // 這個打席之後還有記錄的非打擊跑壘（盜壘、牽制…）不會一起刪除，先提醒
+    // 這個打席之後還有記錄的非打擊跑壘（牽制、投手犯規…）不會一起刪除，先提醒
     const laterPlays = eventsRef.current.some((e) => !e.atbat_id && e.created_at > atbat.created_at);
-    const note = laterPlays ? '\n之後記錄的盜壘／暴投等跑壘事件不會一起刪除，請一併確認。' : '';
+    const note = laterPlays ? '\n之後記錄的牽制等跑壘事件不會一起刪除，請一併確認。' : '';
     if (!window.confirm(`刪除 ${atbat.players?.name ?? ''} 的「${label}」？這個打席的跑壘紀錄會一起刪除。${note}`)) return;
     setDeletingId(atbat.id);
     setError('');
@@ -492,7 +495,7 @@ export default function GamePage() {
       <Card className="gap-3">
         <CardContent className="space-y-3">
           {game.status === 'live' && (
-            // 窄螢幕（375px）放不下並排，局數與盜壘按鈕換到壘包下方一列
+            // 窄螢幕（375px）放不下並排，局數與跑壘事件按鈕換到壘包下方一列
             <div className="flex flex-wrap items-center justify-center sm:justify-between gap-x-2 gap-y-3">
               <BaseDiamond bases={bases} outs={Math.min(3, outsThisInning)} />
               <div className="flex basis-full sm:basis-auto flex-wrap sm:flex-col items-center justify-center gap-3">
@@ -511,11 +514,12 @@ export default function GamePage() {
                     className="h-11"
                     disabled={!hasRunners || saving}
                     onClick={() => {
+                      setError('');
                       dialogSeq.current += 1;
                       setStandaloneKey(dialogSeq.current);
                     }}
                   >
-                    盜壘／暴投…
+                    跑壘事件…
                   </Button>
                 )}
               </div>
@@ -631,7 +635,12 @@ export default function GamePage() {
           initialMoves={runnersDialog.moves}
           outsBefore={outsThisInning}
           saving={saving}
+          error={error}
           onConfirm={saveAtbat}
+          onSwitchToFlyout={() => {
+            setDraft({ ...draft, result: 'flyout' });
+            setRunnersDialog(null);
+          }}
         />
       )}
 
@@ -643,6 +652,7 @@ export default function GamePage() {
           bases={bases}
           outsBefore={outsThisInning}
           saving={saving}
+          error={error}
           onConfirm={saveStandalone}
         />
       )}

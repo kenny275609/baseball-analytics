@@ -54,6 +54,22 @@ describe('countPlateAppearances', () => {
   });
 });
 
+describe('computeStats 與殘缺資料', () => {
+  it('沒有合法結果的列不算打席、打數，和 countPlateAppearances 一致', () => {
+    const rows = (['single', 'strikeout', 'walk'] as ResultCode[]).map((c) => ({ ...resultToFields(c), rbi: 0 }));
+    const broken = [
+      { contacted: true, no_contact: null, result: null, out_type: null, rbi: 0 },
+      { contacted: true, no_contact: null, result: 'bogus', out_type: null, rbi: 0 },
+    ];
+    const all = [...rows, ...broken];
+    const s = computeStats(all);
+    expect(s.pa).toBe(countPlateAppearances(all));
+    expect(s).toMatchObject({ pa: 3, ab: 2, h: 1, bb: 1 });
+    expect(s.avg).toBeCloseTo(1 / 2);
+    expect(s.obp).toBeCloseTo(2 / 3);
+  });
+});
+
 describe('countOuts', () => {
   it('依結果計算出局數', () => {
     const outs = (codes: Parameters<typeof resultToFields>[0][]) => countOuts(codes.map(resultToFields));

@@ -17,8 +17,9 @@ export type RunnerEventType =
   | 'balk'
   | 'other';
 
-// 兩個打席之間可單獨記錄的事件
-export const STANDALONE_EVENTS: { type: RunnerEventType; label: string }[] = [
+// 兩個打席之間的事件類型與名稱。壘球不能盜壘，盜壘／盜壘失敗／暴投／捕逸已不在畫面上提供，
+// 但 API 仍接受、舊紀錄照常顯示
+const RUNNER_EVENT_LABELS: { type: RunnerEventType; label: string }[] = [
   { type: 'steal', label: '盜壘' },
   { type: 'caught_stealing', label: '盜壘失敗' },
   { type: 'wild_pitch', label: '暴投' },
@@ -28,10 +29,14 @@ export const STANDALONE_EVENTS: { type: RunnerEventType; label: string }[] = [
   { type: 'other', label: '其他推進' },
 ];
 
-const STANDALONE_TYPES = new Set(STANDALONE_EVENTS.map((e) => e.type));
+// 比賽頁「跑壘事件」對話框可選的事件（壘球規則）
+const SELECTABLE_TYPES: RunnerEventType[] = ['pickoff', 'balk', 'other'];
+export const STANDALONE_EVENTS = RUNNER_EVENT_LABELS.filter((e) => SELECTABLE_TYPES.includes(e.type));
+
+const STANDALONE_TYPES = new Set(RUNNER_EVENT_LABELS.map((e) => e.type));
 
 export function standaloneLabel(type: string): string {
-  return STANDALONE_EVENTS.find((e) => e.type === type)?.label ?? '跑壘';
+  return RUNNER_EVENT_LABELS.find((e) => e.type === type)?.label ?? '跑壘';
 }
 
 export interface RunnerPlayerRef {
@@ -63,7 +68,7 @@ export type Bases = [null, Runner | null, Runner | null, Runner | null];
 
 export const EMPTY_BASES: Bases = [null, null, null, null];
 
-// 依 play 分組，保持發生順序（API 回傳已依 created_at 排序）
+// 依 play 分組，保持發生順序（API 回傳已依 created_at、id 排序）
 function groupByPlay<T extends Pick<RunnerEvent, 'play_id'>>(events: T[]): T[][] {
   const groups = new Map<string, T[]>();
   for (const e of events) {
@@ -88,6 +93,12 @@ export function computeBases(events: BaseReplayEvent[], inning: number): Bases {
     }
     for (const e of play) {
       if (e.to_base !== null && e.to_base >= 1 && e.to_base <= 3) {
+        // 兩支手機同時記錄可能留下同一位跑者的兩筆移動，先把他從其他壘拿掉，避免出現分身
+        if (e.runner_player_id) {
+          for (const b of [1, 2, 3] as const) {
+            if (bases[b]?.playerId === e.runner_player_id) bases[b] = null;
+          }
+        }
         bases[e.to_base] = { playerId: e.runner_player_id, player: e.players ?? null };
       }
     }
@@ -258,14 +269,24 @@ export function movesOuts(moves: RunnerMove[]): number {
   return moves.filter((m) => m.to === null).length;
 }
 
+// 高飛犧牲打一定要有跑者回本壘得分，否則是一般飛球接殺（算打數）。回傳錯誤訊息；null 表示合法
+export function sacrificeFlyError(code: ResultCode, moves: Pick<RunnerMove, 'from' | 'to'>[]): string | null {
+  if (code !== 'sacrifice_fly') return null;
+  if (moves.some((m) => m.from > 0 && m.to === 4)) return null;
+  return '高飛犧牲打需要有跑者回本壘得分；沒有得分請改記「飛球接殺」';
+}
+
 // 兩個打席之間的事件預設去向（都可在對話框手動修改）：
-//   暴投/捕逸/投手犯規：最前面的跑者推進一個壘，後面的跑者依序跟著推進（＝所有跑者各推進一個壘）
-//   盜壘：最前面的跑者推進一個壘（前方一定沒人擋），其他留在原壘
-//   盜壘失敗/牽制出局：最前面的跑者出局
+//   暴投/捕逸/投手犯規：所有跑者各推進一個壘
+//   盜壘/盜壘失敗（舊資料類型，畫面已不提供）：前方壘包空著、還沒到三壘的最前位跑者
+//     （一三壘有人是一壘跑者，不是三壘跑者盜本壘）；只有三壘有人時才是三壘跑者
+//   牽制出局：最前面的跑者出局
 //   其他：留在原壘，由使用者選
 export function standaloneDefaults(type: RunnerEventType, bases: Bases): RunnerMove[] {
   const occupied = ([3, 2, 1] as const).filter((b) => bases[b]);
   const lead = occupied[0];
+  const stealer =
+    occupied.find((b) => b < 3 && !bases[(b + 1) as 2 | 3]) ?? (occupied.length === 1 ? lead : undefined);
   const to = (b: number): number | null => {
     switch (type) {
       case 'wild_pitch':
@@ -273,8 +294,9 @@ export function standaloneDefaults(type: RunnerEventType, bases: Bases): RunnerM
       case 'balk':
         return b + 1;
       case 'steal':
-        return b === lead ? b + 1 : b;
+        return b === stealer ? b + 1 : b;
       case 'caught_stealing':
+        return b === stealer ? null : b;
       case 'pickoff':
         return b === lead ? null : b;
       default:
@@ -373,8 +395,9 @@ export function parseRunnerInputs(value: unknown, allowBatter: boolean): RunnerE
   return all && movedRunners(all);
 }
 
-// 伺服器端：送來的跑者必須真的在壘上（bases 由資料庫裡該局事件重播），
-// 沒送到的壘上跑者視為留在原壘，一起檢查不能被超越或同壘兩人。回傳錯誤訊息；null 表示合法
+// 伺服器端：送來的跑者必須真的在壘上（bases 由資料庫裡該局事件重播）。
+// 前端一律送出畫面上所有壘上跑者（含停在原壘的），所以資料庫壘上有人但沒送到，
+// 代表畫面已過期（例如另一支手機剛記了安打），直接擋下請使用者重新整理。回傳錯誤訊息；null 表示合法
 export function checkRunnersOnBases(all: RunnerEventInput[], bases: Bases): string | null {
   for (const r of all) {
     if (r.from_base === 0) continue;
@@ -383,8 +406,9 @@ export function checkRunnersOnBases(all: RunnerEventInput[], bases: Bases): stri
     if (onBase.playerId !== r.runner_player_id) return `${r.from_base} 壘跑者與紀錄不符，請重新整理後再記錄`;
   }
   const sent = new Set(all.map((r) => r.from_base));
-  const stays = ([1, 2, 3] as const).filter((b) => bases[b] && !sent.has(b)).map((b) => ({ from: b, to: b }));
-  return validateMoves([...all.map((r) => ({ from: r.from_base, to: r.to_base })), ...stays]);
+  const missing = ([1, 2, 3] as const).find((b) => bases[b] && !sent.has(b));
+  if (missing) return `${missing} 壘有跑者但畫面上沒有，可能是其他裝置剛記錄過，請重新整理後再記錄`;
+  return validateMoves(all.map((r) => ({ from: r.from_base, to: r.to_base })));
 }
 
 export function isStandaloneType(value: unknown): value is RunnerEventType {

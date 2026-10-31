@@ -25,12 +25,15 @@ export async function GET(request: Request) {
         .from('atbats')
         .select('*, players(name, number)')
         .eq('game_id', id)
-        .order('created_at'),
+        .order('created_at')
+        .order('id'),
       supabase
         .from('runner_events')
         .select('*, players(name, number)')
         .eq('game_id', id)
-        .order('created_at'),
+        // 和伺服器端驗證（basesServer）同樣的重播順序
+        .order('created_at')
+        .order('id'),
       supabase.from('game_innings').select('inning, opp_runs').eq('game_id', id).order('inning'),
     ]);
 
