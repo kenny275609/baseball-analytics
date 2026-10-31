@@ -47,9 +47,11 @@ const GROUP_ACTIVE: Record<ResultGroup, string> = {
 interface AtbatEntryProps {
   draft: AtbatDraft;
   onChange: (draft: AtbatDraft) => void;
+  // 比賽頁的打點由跑壘去向自動計算，在跑者對話框裡調整
+  showRbi?: boolean;
 }
 
-export function AtbatEntry({ draft, onChange }: AtbatEntryProps) {
+export function AtbatEntry({ draft, onChange, showRbi = true }: AtbatEntryProps) {
   const selected = getResultOption(draft.result);
   // 舊資料可能是「出局（未分類）」，編輯時也要能顯示被選取
   const options = draft.result === 'out' ? RESULT_OPTIONS : QUICK_RESULTS;
@@ -130,28 +132,30 @@ export function AtbatEntry({ draft, onChange }: AtbatEntryProps) {
         </>
       )}
 
-      <div className="flex items-center gap-3">
-        <span className="text-sm font-medium">打點</span>
-        <Button
-          type="button"
-          variant="outline"
-          size="icon"
-          onClick={() => onChange({ ...draft, rbi: Math.max(0, draft.rbi - 1) })}
-          disabled={draft.rbi <= 0}
-        >
-          −
-        </Button>
-        <span className="w-6 text-center text-lg font-bold tabular-nums">{draft.rbi}</span>
-        <Button
-          type="button"
-          variant="outline"
-          size="icon"
-          onClick={() => onChange({ ...draft, rbi: Math.min(4, draft.rbi + 1) })}
-          disabled={draft.rbi >= 4}
-        >
-          +
-        </Button>
-      </div>
+      {showRbi && (
+        <div className="flex items-center gap-3">
+          <span className="text-sm font-medium">打點</span>
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            onClick={() => onChange({ ...draft, rbi: Math.max(0, draft.rbi - 1) })}
+            disabled={draft.rbi <= 0}
+          >
+            −
+          </Button>
+          <span className="w-6 text-center text-lg font-bold tabular-nums">{draft.rbi}</span>
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            onClick={() => onChange({ ...draft, rbi: Math.min(4, draft.rbi + 1) })}
+            disabled={draft.rbi >= 4}
+          >
+            +
+          </Button>
+        </div>
+      )}
 
       <Input
         value={draft.note}
