@@ -14,6 +14,8 @@ import { AtbatRunnersDialog, StandaloneRunnerDialog } from '@/components/RunnerD
 import { SubstitutionDialog, SubstitutionRequest } from '@/components/SubstitutionDialog';
 import { Scoreboard } from '@/components/Scoreboard';
 import { SprayChart } from '@/components/SprayChart';
+import { ShareCardButton } from '@/components/ShareCardButton';
+import { buildShareCard } from '@/lib/shareCard';
 import { useSession } from '@/lib/useSession';
 import {
   AtbatResultFields,
@@ -998,6 +1000,25 @@ export default function GamePage() {
                 ? '對手每局得分直接在記分板輸入；我方得分由跑壘紀錄自動計算。'
                 : '這場比賽有沒有跑壘紀錄的舊打席，我方比分請在下方手動輸入。'}
             </p>
+          )}
+          {/* 賽後戰報分享卡：比賽結束後才出現，只讀目前畫面上的資料 */}
+          {game.status === 'final' && (
+            <ShareCardButton
+              fileName={`戰報_${game.game_date}_vs_${game.opponent.replace(/[\\/:*?"<>|\s]+/g, '_')}.png`}
+              data={buildShareCard({
+                opponent: game.opponent,
+                gameDate: game.game_date,
+                homeAway: game.home_away,
+                innings: boardInnings,
+                ourRuns: tracked ? ourRuns : null,
+                ourTotal,
+                oppRuns,
+                oppTotal,
+                rows: boxRows.map((r) => ({ playerId: r.playerId, name: r.player?.name ?? '—', slot: r.slot, current: r.current })),
+                atbats,
+                events: runnerEvents,
+              })}
+            />
           )}
         </CardContent>
       </Card>
