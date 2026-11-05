@@ -39,7 +39,7 @@ import {
   nextTurn,
   outsInInning,
   runsByInning,
-  sacrificeFlyError,
+  sacrificeError,
   standaloneLabel,
 } from '@/lib/baserunning';
 import {
@@ -357,6 +357,10 @@ export default function GamePage() {
     if (next.slot !== prev.slot || next.inning !== prev.inning) {
       setSlot(next.slot);
       setInning(next.inning);
+      // 其他裝置記錄後換了打者：選到一半的結果和跑者去向是上一位打者的，不能留給新打者
+      setDraft(EMPTY_DRAFT);
+      setRunnersDialog(null);
+      setNotice('');
     }
   }, [load, mergedNow]);
 
@@ -463,7 +467,7 @@ export default function GamePage() {
       outsThisInning
     );
     const mismatch = movesOuts(moves) !== (getResultOption(draft.result)?.outs ?? 0);
-    if (adjust || moves.length > 1 || mismatch || sacrificeFlyError(draft.result, moves)) {
+    if (adjust || moves.length > 1 || mismatch || sacrificeError(draft.result, moves)) {
       setError('');
       dialogSeq.current += 1;
       setRunnersDialog({ key: dialogSeq.current, moves });
@@ -1176,7 +1180,7 @@ export default function GamePage() {
           error={error}
           onConfirm={saveAtbat}
           onSwitchToFlyout={() => {
-            setDraft({ ...draft, result: 'flyout' });
+            setDraft({ ...draft, result: draft.result === 'sacrifice' ? 'groundout' : 'flyout' });
             setRunnersDialog(null);
           }}
           onSwitchToSacrificeFly={() => setDraft({ ...draft, result: 'sacrifice_fly' })}

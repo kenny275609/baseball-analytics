@@ -23,7 +23,7 @@ import {
   parseAllRunnerInputs,
   parseRunnerInputs,
   runsByInning,
-  sacrificeFlyError,
+  sacrificeError,
   shouldBeSacrificeFly,
   standaloneDefaults,
   standaloneLabel,
@@ -860,20 +860,20 @@ describe('壘球：不提供盜壘／暴投', () => {
   });
 });
 
-describe('sacrificeFlyError', () => {
+describe('sacrificeError', () => {
   it('高飛犧牲打沒有跑者得分要擋下，提示改記飛球接殺', () => {
-    expect(sacrificeFlyError('sacrifice_fly', [{ from: 0, to: null }])).toMatch('飛球接殺');
-    expect(sacrificeFlyError('sacrifice_fly', [{ from: 0, to: null }, { from: 1, to: 1 }, { from: 2, to: 3 }])).toMatch('飛球接殺');
-    expect(sacrificeFlyError('sacrifice_fly', [{ from: 0, to: null }, { from: 3, to: 4 }])).toBeNull();
+    expect(sacrificeError('sacrifice_fly', [{ from: 0, to: null }])).toMatch('飛球接殺');
+    expect(sacrificeError('sacrifice_fly', [{ from: 0, to: null }, { from: 1, to: 1 }, { from: 2, to: 3 }])).toMatch('飛球接殺');
+    expect(sacrificeError('sacrifice_fly', [{ from: 0, to: null }, { from: 3, to: 4 }])).toBeNull();
     // 打者自己回本壘不算
-    expect(sacrificeFlyError('sacrifice_fly', [{ from: 0, to: 4 }])).toMatch('飛球接殺');
-    expect(sacrificeFlyError('flyout', [{ from: 0, to: null }])).toBeNull();
+    expect(sacrificeError('sacrifice_fly', [{ from: 0, to: 4 }])).toMatch('飛球接殺');
+    expect(sacrificeError('flyout', [{ from: 0, to: null }])).toBeNull();
   });
 
   it('壘上無人或三壘無人時，高飛犧牲打的預設去向不通過', () => {
-    expect(sacrificeFlyError('sacrifice_fly', defaultMoves('sacrifice_fly', EMPTY_BASES, batter))).not.toBeNull();
-    expect(sacrificeFlyError('sacrifice_fly', defaultMoves('sacrifice_fly', bases(A, B, null), batter))).not.toBeNull();
-    expect(sacrificeFlyError('sacrifice_fly', defaultMoves('sacrifice_fly', bases(A, null, C), batter, 1))).toBeNull();
+    expect(sacrificeError('sacrifice_fly', defaultMoves('sacrifice_fly', EMPTY_BASES, batter))).not.toBeNull();
+    expect(sacrificeError('sacrifice_fly', defaultMoves('sacrifice_fly', bases(A, B, null), batter))).not.toBeNull();
+    expect(sacrificeError('sacrifice_fly', defaultMoves('sacrifice_fly', bases(A, null, C), batter, 1))).toBeNull();
   });
 });
 
@@ -983,5 +983,15 @@ describe('shouldBeSacrificeFly', () => {
     expect(shouldBeSacrificeFly('flyout', moves(2, 4), 0)).toBe(false);
     expect(shouldBeSacrificeFly('flyout', moves(3, 3), 0)).toBe(false);
     expect(shouldBeSacrificeFly('groundout', moves(3, 4), 0)).toBe(false);
+  });
+});
+
+describe('犧牲觸擊防呆', () => {
+  it('有跑者推進才算犧牲觸擊', () => {
+    const batterOut = { from: 0, to: null };
+    expect(sacrificeError('sacrifice', [batterOut, { from: 1, to: 2 }])).toBeNull();
+    expect(sacrificeError('sacrifice', [batterOut])).toContain('滾地出局');
+    expect(sacrificeError('sacrifice', [batterOut, { from: 1, to: 1 }])).toContain('滾地出局');
+    expect(sacrificeError('sacrifice', [batterOut, { from: 1, to: null }])).toContain('滾地出局');
   });
 });

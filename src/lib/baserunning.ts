@@ -317,8 +317,13 @@ export function movesOuts(moves: RunnerMove[]): number {
   return moves.filter((m) => m.to === null).length;
 }
 
-// 高飛犧牲打一定要有跑者回本壘得分，否則是一般飛球接殺（算打數）。回傳錯誤訊息；null 表示合法
-export function sacrificeFlyError(code: ResultCode, moves: Pick<RunnerMove, 'from' | 'to'>[]): string | null {
+// 高飛犧牲打一定要有跑者回本壘得分，否則是一般飛球接殺；犧牲觸擊一定要有跑者推進，否則是一般滾地出局
+// （兩者都算打數）。回傳錯誤訊息；null 表示合法
+export function sacrificeError(code: ResultCode, moves: Pick<RunnerMove, 'from' | 'to'>[]): string | null {
+  if (code === 'sacrifice') {
+    if (moves.some((m) => m.from > 0 && m.to !== null && m.to > m.from)) return null;
+    return '犧牲觸擊需要有跑者推進；沒有推進請改記「滾地出局」';
+  }
   if (code !== 'sacrifice_fly') return null;
   if (moves.some((m) => m.from > 0 && m.to === 4)) return null;
   return '高飛犧牲打需要有跑者回本壘得分；沒有得分請改記「飛球接殺」';

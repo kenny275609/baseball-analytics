@@ -19,7 +19,7 @@ import {
   STANDALONE_EVENTS,
   autoRbi,
   movesOuts,
-  sacrificeFlyError,
+  sacrificeError,
   shouldBeSacrificeFly,
   standaloneDefaults,
   validateMoves,
@@ -126,7 +126,7 @@ interface AtbatRunnersDialogProps {
   saving: boolean;
   error?: string;
   onConfirm: (moves: RunnerMove[], rbi: number) => void;
-  // 高飛犧牲打沒有跑者得分時，改記飛球接殺
+  // 犧牲打不成立時改記一般出局：高飛犧牲打 → 飛球接殺、犧牲觸擊 → 滾地出局
   onSwitchToFlyout?: () => void;
   // 飛球接殺但三壘跑者得分時，改記高飛犧牲打（對話框保持開啟，跑者去向不變）
   onSwitchToSacrificeFly?: () => void;
@@ -149,7 +149,7 @@ export function AtbatRunnersDialog({
   const [rbiOverride, setRbiOverride] = useState<number | null>(null);
   const rbi = rbiOverride ?? autoRbi(code, moves);
   const invalid = validateMoves(moves);
-  const sfError = sacrificeFlyError(code, moves);
+  const sfError = sacrificeError(code, moves);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -184,7 +184,7 @@ export function AtbatRunnersDialog({
             <p>{sfError}</p>
             {onSwitchToFlyout && (
               <Button type="button" variant="outline" className="h-11" onClick={onSwitchToFlyout} disabled={saving}>
-                改記飛球接殺
+                {code === 'sacrifice' ? '改記滾地出局' : '改記飛球接殺'}
               </Button>
             )}
           </div>
