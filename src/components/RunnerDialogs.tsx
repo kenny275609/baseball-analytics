@@ -20,6 +20,7 @@ import {
   autoRbi,
   movesOuts,
   sacrificeFlyError,
+  shouldBeSacrificeFly,
   standaloneDefaults,
   validateMoves,
 } from '@/lib/baserunning';
@@ -127,6 +128,8 @@ interface AtbatRunnersDialogProps {
   onConfirm: (moves: RunnerMove[], rbi: number) => void;
   // 高飛犧牲打沒有跑者得分時，改記飛球接殺
   onSwitchToFlyout?: () => void;
+  // 飛球接殺但三壘跑者得分時，改記高飛犧牲打（對話框保持開啟，跑者去向不變）
+  onSwitchToSacrificeFly?: () => void;
 }
 
 // 每次開啟用 key 重新掛載，初始值直接從 props 帶入
@@ -140,6 +143,7 @@ export function AtbatRunnersDialog({
   error,
   onConfirm,
   onSwitchToFlyout,
+  onSwitchToSacrificeFly,
 }: AtbatRunnersDialogProps) {
   const [moves, setMoves] = useState(initialMoves);
   const [rbiOverride, setRbiOverride] = useState<number | null>(null);
@@ -183,6 +187,14 @@ export function AtbatRunnersDialog({
                 改記飛球接殺
               </Button>
             )}
+          </div>
+        )}
+        {shouldBeSacrificeFly(code, moves, outsBefore) && onSwitchToSacrificeFly && (
+          <div className="text-sm text-amber-700 space-y-2">
+            <p>三壘跑者靠飛球接殺回本壘，依規則是高飛犧牲打（不算打數）。</p>
+            <Button type="button" variant="outline" className="h-11" onClick={onSwitchToSacrificeFly} disabled={saving}>
+              改記高飛犧牲打
+            </Button>
           </div>
         )}
         <SaveError error={error} />

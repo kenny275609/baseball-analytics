@@ -16,6 +16,7 @@ import {
   isTracked,
   isUuid,
   movesOuts,
+  laterRunnerMoves,
   nextTurn,
   movedRunners,
   outsInInning,
@@ -23,6 +24,7 @@ import {
   parseRunnerInputs,
   runsByInning,
   sacrificeFlyError,
+  shouldBeSacrificeFly,
   standaloneDefaults,
   standaloneLabel,
   validateMoves,
@@ -911,5 +913,75 @@ describe('batterEventPatch（修改打席結果）', () => {
     expect(
       batterEventPatch('single', 'double', [...batterOnly, { id: 'e2', from_base: 1, to_base: 2 }])
     ).toEqual({ kind: 'warn' });
+  });
+});
+
+// ============================================
+// 模擬整場比賽時發現的問題
+// ============================================
+
+describe('補記到過去的局', () => {
+  const orders = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+  const atbat = (id: string, inning: number, order: number) =>
+    ({ id, inning, batting_order: order, contacted: false, no_contact: 'strikeout', result: null, out_type: null });
+
+  it('局數不會倒退，下一棒也不受補記影響', () => {
+    const atbats = [atbat('a1', 2, 3), atbat('a2', 5, 7), atbat('late', 2, 8)];
+    const events = [ev(2, 'p1', A, 0, null), ev(5, 'p2', B, 0, null), ev(2, 'p3', C, 0, null, { atbat_id: 'late' })];
+    expect(nextTurn(atbats, events, orders)).toEqual({ slot: 8, inning: 5 });
+  });
+
+  it('沒有局數的舊打席維持依時間的最後一筆', () => {
+    const atbats = [atbat('a1', 0, 3), atbat('a2', 0, 4)].map((a) => ({ ...a, inning: null }));
+    expect(nextTurn(atbats, [], orders).slot).toBe(5);
+  });
+});
+
+describe('laterRunnerMoves', () => {
+  const batter = { id: 'x', player_id: A, inning: 2, created_at: '2026-11-05T10:00:00.000Z' };
+  const move = (runner: string, inning: number, from: number, at: string, atbatId: string | null = 'y') => ({
+    atbat_id: atbatId,
+    inning,
+    runner_player_id: runner,
+    from_base: from,
+    created_at: at,
+  });
+
+  it('算到這位打者上壘後同一局的推進，不算其他人、其他局或更早的紀錄', () => {
+    const events = [
+      move(A, 2, 0, '2026-11-05T10:00:00.000Z', 'x'),
+      move(A, 2, 1, '2026-11-05T10:01:00.000Z'),
+      move(A, 2, 2, '2026-11-05T10:02:00.000Z'),
+      move(B, 2, 1, '2026-11-05T10:03:00.000Z'),
+      move(A, 3, 1, '2026-11-05T10:04:00.000Z'),
+      move(A, 2, 1, '2026-11-05T09:00:00.000Z'),
+    ];
+    expect(laterRunnerMoves(batter, events)).toBe(2);
+  });
+
+  it('代跑者接著跑也算', () => {
+    const subs = [{ inning: 2, out_player_id: A, in_player_id: B, created_at: '2026-11-05T10:01:00.000Z' }];
+    const events = [move(B, 2, 1, '2026-11-05T10:02:00.000Z')];
+    expect(laterRunnerMoves(batter, events, subs)).toBe(1);
+    expect(laterRunnerMoves(batter, events)).toBe(0);
+  });
+});
+
+describe('shouldBeSacrificeFly', () => {
+  const moves = (runnerFrom: number, to: number | null): RunnerMove[] => [
+    { playerId: A, player: null, from: 0, to: null },
+    { playerId: B, player: null, from: runnerFrom, to },
+  ];
+
+  it('飛球接殺、三壘跑者得分時提示', () => {
+    expect(shouldBeSacrificeFly('flyout', moves(3, 4), 0)).toBe(true);
+    expect(shouldBeSacrificeFly('flyout', moves(3, 4), 1)).toBe(true);
+  });
+
+  it('第 3 出局、其他壘跑者、其他結果不提示', () => {
+    expect(shouldBeSacrificeFly('flyout', moves(3, 4), 2)).toBe(false);
+    expect(shouldBeSacrificeFly('flyout', moves(2, 4), 0)).toBe(false);
+    expect(shouldBeSacrificeFly('flyout', moves(3, 3), 0)).toBe(false);
+    expect(shouldBeSacrificeFly('groundout', moves(3, 4), 0)).toBe(false);
   });
 });

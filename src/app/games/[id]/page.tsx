@@ -34,6 +34,7 @@ import {
   computeBases,
   defaultMoves,
   isTracked,
+  laterRunnerMoves,
   movesOuts,
   nextTurn,
   outsInInning,
@@ -221,6 +222,11 @@ export default function GamePage() {
   const [players, setPlayers] = useState<Player[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  // 記錄後的回饋（畫面不跳回頂部，要讓人知道記到了、有沒有換局）
+  const [notice, setNotice] = useState('');
+  const [scrollSeq, setScrollSeq] = useState(0);
+  // 按了換人但當下不能換：原因依目前狀態顯示，同步完成後自動消失
+  const [subBlocked, setSubBlocked] = useState(false);
   // 離線打開：顯示的是這支手機上次載入的資料
   const [stale, setStale] = useState(false);
   const loadedRef = useRef(false);
@@ -241,6 +247,7 @@ export default function GamePage() {
   const [standaloneKey, setStandaloneKey] = useState<number | null>(null);
   const dialogSeq = useRef(0);
   const lineupStripRef = useRef<HTMLDivElement>(null);
+  const entryRef = useRef<HTMLDivElement>(null);
   // 非同步操作完成時拿最新的打席/打序/跑壘，而不是點擊當下閉包裡的舊值
   const atbatsRef = useRef<Atbat[]>([]);
   const lineupRef = useRef<LineupSlot[]>([]);
@@ -418,6 +425,9 @@ export default function GamePage() {
   const hasRunners = bases.some(Boolean);
   const outsThisInning = outsInInning(atbats, runnerEvents, inning);
   const recording = canEdit && game?.status === 'live';
+  // 依紀錄推算的目前局數；手動切到更早的局（補記）時和 inning 不同
+  const liveInning = nextState(atbats, runnerEvents, lineup).inning;
+  const backfilling = recording && inning < liveInning;
   // 同步被擋下時不能記新紀錄：新紀錄會排在被拒絕的那筆後面，一定也會失敗
   const recordBlocked = blockedItem !== null;
 
@@ -433,12 +443,19 @@ export default function GamePage() {
     }
   }, [slot, lineup, recording]);
 
+  // 記錄後捲到打序和結果按鈕，下一位打者不用再往下滑（壘包與出局數顯示在打者旁邊）。
+  // 等畫面更新、對話框解除捲動鎖定後才捲；smooth 會被打序列的捲動中斷，這裡直接跳過去
+  useEffect(() => {
+    if (scrollSeq > 0) entryRef.current?.scrollIntoView({ block: 'start' });
+  }, [scrollSeq]);
+
   // 壘上有人：先逐一詢問跑者去向；壘上無人：打者落點依結果決定，直接記錄。
   // 壘上無人但結果的出局數和預設去向對不上（野選、雙殺…），或使用者要調整打者去向
   // （不死三振、安打趁傳多跑一個壘）時，也打開對話框；
   // 高飛犧牲打沒有跑者得分（例如壘上無人）也要打開，提示改記飛球接殺，不直接存成 SF
   const startSave = (adjust = false) => {
     if (!currentSlot || !draft.result) return;
+    if (backfilling && outsThisInning >= 3 && !window.confirm(`第 ${inning} 局已經 ${outsThisInning} 出局，確定還要補記到這一局嗎？`)) return;
     const moves = defaultMoves(
       draft.result,
       bases,
@@ -519,7 +536,9 @@ export default function GamePage() {
     setInning(next.inning);
     setDraft(EMPTY_DRAFT);
     setRunnersDialog(null);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    const inningOver = !backfilling && next.inning === inning + 1 && outsInInning(merged.atbats, merged.events, inning) >= 3;
+    setNotice(`已記錄：${item.label}${inningOver ? `。三出局，進入 ${next.inning} 局` : ''}`);
+    setScrollSeq((n) => n + 1);
   };
 
   const saveStandalone = async (type: RunnerEventType, moves: RunnerMove[]) => {
@@ -535,7 +554,9 @@ export default function GamePage() {
     if (!(await submit(item))) return;
     // 牽制等跑壘事件造成第三個出局就換局（打者不變）
     const merged = mergedNow();
-    setInning(nextState(merged.atbats, merged.events, lineupRef.current).inning);
+    const nextInning = nextState(merged.atbats, merged.events, lineupRef.current).inning;
+    setInning(nextInning);
+    setNotice(`已記錄：${item.label}${!backfilling && nextInning === inning + 1 ? `。三出局，進入 ${nextInning} 局` : ''}`);
     setStandaloneKey(null);
   };
 
@@ -545,6 +566,7 @@ export default function GamePage() {
   const undoLast = async () => {
     if (undoing || saving || subSaving) return;
     setError('');
+    setNotice('');
     const storage = queueStorage();
     const queue = readQueue(storage, gameId);
     if (queue.length > 0) {
@@ -637,8 +659,15 @@ export default function GamePage() {
     const label = getResultOption(fieldsToResult(atbat))?.label ?? '';
     if (deletingId) return;
     // 這個打席之後還有記錄的非打擊跑壘（牽制、投手犯規…）不會一起刪除，先提醒
-    const laterPlays = eventsRef.current.some((e) => !e.atbat_id && timeKey(e.created_at) > timeKey(atbat.created_at));
-    const note = laterPlays ? '\n之後記錄的牽制等跑壘事件不會一起刪除，請一併確認。' : '';
+    const laterPlays = eventsRef.current.some(
+      (e) => !e.atbat_id && e.inning === atbat.inning && timeKey(e.created_at) > timeKey(atbat.created_at)
+    );
+    // 這位打者上壘後的推進、得分記在後面的打席，也不會一起刪除，比分會留著
+    const laterMoves = laterRunnerMoves(atbat, eventsRef.current, subsRef.current.filter((s) => s.sub_type === 'pinch_runner'));
+    const note =
+      (laterMoves > 0
+        ? `\n這位打者上壘後還有 ${laterMoves} 筆跑壘紀錄（含得分）不會一起刪除，比分和壘包可能對不上，請一併修正後面的打席。`
+        : '') + (laterPlays ? '\n之後記錄的牽制等跑壘事件不會一起刪除，請一併確認。' : '');
     if (!window.confirm(`刪除 ${atbat.players?.name ?? ''} 的「${label}」？這個打席的跑壘紀錄會一起刪除。${note}`)) return;
     setDeletingId(atbat.id);
     setError('');
@@ -747,10 +776,8 @@ export default function GamePage() {
 
   const openSub = (type: SubType) => {
     const reason = subBlockedReason();
-    if (reason) {
-      setError(reason);
-      return;
-    }
+    setSubBlocked(!!reason);
+    if (reason) return;
     setError('');
     setSubError('');
     dialogSeq.current += 1;
@@ -797,6 +824,13 @@ export default function GamePage() {
     } finally {
       setSubSaving(false);
     }
+  };
+
+  const finishGame = (tracked: boolean, ourTotal: number | null, oppTotal: number | null) => {
+    const score = tracked ? `比分 ${ourTotal ?? 0} : ${oppTotal ?? 0}` : '';
+    const oppMissing = tracked && innings.length === 0 ? '\n對手得分還沒填，戰報會顯示對手 0 分。' : '';
+    if (!window.confirm(`結束比賽？${score}${oppMissing}`)) return;
+    void updateGame(tracked ? { status: 'final' } : { status: 'final', our_score: ourScore, opp_score: oppScore });
   };
 
   const updateGame = async (updates: Record<string, unknown>) => {
@@ -873,6 +907,17 @@ export default function GamePage() {
     .map((a) => ({ x: a.hit_x!, y: a.hit_y!, group: getResultOption(fieldsToResult(a))?.group }));
 
   const draftLabel = getResultOption(draft.result)?.label;
+  const subBlockReason = subBlocked ? subBlockedReason() : null;
+  const basesText = ([1, 2, 3] as const).filter((b) => bases[b]).map((b) => ['', '一', '二', '三'][b]).join('');
+  // 主場我方打下半局：這局已經開始打擊，下一次守備是下一局上半；客場守備是這局下半
+  const defenseInning =
+    game.home_away === 'home' && (atbats.some((a) => a.inning === inning) || runnerEvents.some((e) => e.inning === inning))
+      ? Math.min(30, inning + 1)
+      : inning;
+  const runsByPlayer = new Map<string, number>();
+  for (const e of runnerEvents) {
+    if (e.to_base === 4 && e.runner_player_id) runsByPlayer.set(e.runner_player_id, (runsByPlayer.get(e.runner_player_id) ?? 0) + 1);
+  }
 
   return (
     <div className="container mx-auto px-4 py-4 max-w-2xl space-y-4 pb-28">
@@ -891,6 +936,7 @@ export default function GamePage() {
       </div>
 
       {error && <div className="text-sm text-red-600 bg-red-50 p-3 rounded-md">{error}</div>}
+      {subBlockReason && <div className="text-sm text-red-600 bg-red-50 p-3 rounded-md">{subBlockReason}</div>}
       {stale && (
         <div className="text-sm text-amber-900 bg-amber-50 p-3 rounded-md">
           目前離線，顯示的是這支手機上次載入的資料；新紀錄會先存在手機，連線後自動上傳並檢查是否和其他裝置衝突。
@@ -1024,8 +1070,18 @@ export default function GamePage() {
       </Card>
 
       {recording && (
+        <div ref={entryRef} className="scroll-mt-2">
         <Card className="gap-4">
           <CardContent className="space-y-4">
+            {backfilling && (
+              <div className="flex items-center gap-2 rounded-md bg-amber-50 p-2 text-sm text-amber-900">
+                <span className="min-w-0 flex-1">正在看第 {inning} 局（目前第 {liveInning} 局），現在記錄會補進第 {inning} 局</span>
+                <Button variant="outline" size="sm" className="h-10 shrink-0 bg-white" onClick={() => setInning(liveInning)}>
+                  回到第 {liveInning} 局
+                </Button>
+              </div>
+            )}
+            {notice && <div className="rounded-md bg-green-50 p-2 text-sm text-green-800">{notice}</div>}
             {/* 打序 */}
             <div ref={lineupStripRef} className="relative flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
               {lineup.map((l) => (
@@ -1062,6 +1118,9 @@ export default function GamePage() {
 
             <div className="flex items-center justify-between gap-2 rounded-lg bg-gray-50 px-3 py-2">
               <div className="min-w-0">
+                <div className="text-xs text-gray-500">
+                  {inning} 局 · {Math.min(3, outsThisInning)} 出局 · {basesText ? `${basesText}壘有人` : '壘上無人'}
+                </div>
                 <div className="text-xs text-gray-500">打擊中 · 第 {slot} 棒</div>
                 <div className="text-lg font-bold truncate">{playerLabel(currentSlot?.players ?? null)}</div>
               </div>
@@ -1073,6 +1132,7 @@ export default function GamePage() {
             <AtbatEntry draft={draft} onChange={setDraft} showRbi={false} />
           </CardContent>
         </Card>
+        </div>
       )}
 
       {recording && (
@@ -1119,6 +1179,7 @@ export default function GamePage() {
             setDraft({ ...draft, result: 'flyout' });
             setRunnersDialog(null);
           }}
+          onSwitchToSacrificeFly={() => setDraft({ ...draft, result: 'sacrifice_fly' })}
         />
       )}
 
@@ -1151,6 +1212,7 @@ export default function GamePage() {
           saving={subSaving}
           error={subError}
           onConfirm={saveSub}
+          defenseInning={defenseInning}
         />
       )}
 
@@ -1295,6 +1357,7 @@ export default function GamePage() {
                   <TableHead className="text-right">打數</TableHead>
                   <TableHead className="text-right">安打</TableHead>
                   <TableHead className="text-right">打點</TableHead>
+                  <TableHead className="text-right">得分</TableHead>
                   <TableHead className="text-right">四死</TableHead>
                   <TableHead className="text-right">三振</TableHead>
                 </TableRow>
@@ -1314,6 +1377,7 @@ export default function GamePage() {
                       <TableCell className="text-right tabular-nums">{s.ab}</TableCell>
                       <TableCell className="text-right tabular-nums">{s.h}</TableCell>
                       <TableCell className="text-right tabular-nums">{s.rbi}</TableCell>
+                      <TableCell className="text-right tabular-nums">{runsByPlayer.get(id) ?? 0}</TableCell>
                       <TableCell className="text-right tabular-nums">{s.bb + s.hbp}</TableCell>
                       <TableCell className="text-right tabular-nums">{s.so}</TableCell>
                     </TableRow>
@@ -1360,7 +1424,7 @@ export default function GamePage() {
               {game.status === 'live' ? (
                 <Button
                   disabled={pending.length > 0}
-                  onClick={() => updateGame(tracked ? { status: 'final' } : { status: 'final', our_score: ourScore, opp_score: oppScore })}
+                  onClick={() => finishGame(tracked, ourTotal, oppTotal)}
                 >
                   結束比賽
                 </Button>

@@ -288,7 +288,7 @@ export function defaultMoves(
 // 打者自己回本壘只有全壘打算打點（安打再趁失誤跑回來不算）
 const NO_RBI_CODES: ResultCode[] = ['error', 'double_play', 'triple_play', 'strikeout'];
 
-export function autoRbi(code: ResultCode, moves: RunnerMove[]): number {
+export function autoRbi(code: ResultCode, moves: Pick<RunnerMove, 'from' | 'to'>[]): number {
   if (NO_RBI_CODES.includes(code)) return 0;
   return Math.min(4, moves.filter((m) => m.to === 4 && (m.from > 0 || code === 'homerun')).length);
 }
@@ -322,6 +322,13 @@ export function sacrificeFlyError(code: ResultCode, moves: Pick<RunnerMove, 'fro
   if (code !== 'sacrifice_fly') return null;
   if (moves.some((m) => m.from > 0 && m.to === 4)) return null;
   return '高飛犧牲打需要有跑者回本壘得分；沒有得分請改記「飛球接殺」';
+}
+
+// 飛球接殺但三壘跑者回本壘：依規則是高飛犧牲打（不算打數），提示使用者改記。
+// 第 3 出局的飛球接殺同一個 play 不會有人得分，不提示
+export function shouldBeSacrificeFly(code: ResultCode, moves: RunnerMove[], outsBefore: number): boolean {
+  if (code !== 'flyout' || outsBefore + movesOuts(moves) >= 3) return false;
+  return moves.some((m) => m.from === 3 && m.to === 4);
 }
 
 // 兩個打席之間的事件預設去向（都可在對話框手動修改）：
@@ -359,21 +366,49 @@ export function standaloneDefaults(type: RunnerEventType, bases: Bases): RunnerM
   }));
 }
 
-// 根據最後一個打席推算下一位打者，局數看最後一筆紀錄（打席或跑壘事件）：同局出局數滿 3 就換下一局
+// 根據最新一局的最後一個打席推算下一位打者，局數取所有紀錄（打席或跑壘事件）裡最大的一局：
+// 同局出局數滿 3 就換下一局。補記到過去的局不會讓局數倒退、也不影響目前的打者
 export function nextTurn(
   atbats: (AtbatResultFields & { id: string; inning: number | null; batting_order: number | null })[],
   events: RunnerEvent[],
   orders: number[]
 ): { slot: number; inning: number } {
-  const last = atbats[atbats.length - 1];
-  const lastEvent = events[events.length - 1];
-  if (!last && !lastEvent) return { slot: orders[0] ?? 1, inning: 1 };
+  if (atbats.length === 0 && events.length === 0) return { slot: orders[0] ?? 1, inning: 1 };
+
+  const latestAtbatInning = Math.max(0, ...atbats.map((a) => a.inning ?? 0));
+  const last = atbats.filter((a) => (a.inning ?? 0) === latestAtbatInning).at(-1);
 
   const lastIndex = orders.indexOf(last?.batting_order ?? -1);
   const slot = last ? orders[(lastIndex + 1) % orders.length] ?? orders[0] ?? 1 : orders[0] ?? 1;
-  const inning = Math.max(last?.inning ?? 1, lastEvent?.inning ?? 1);
+  const inning = Math.max(1, latestAtbatInning, ...events.map((e) => e.inning));
   const outs = outsInInning(atbats, events, inning);
   return { slot, inning: outs >= 3 ? inning + 1 : inning };
+}
+
+// 這位打者上壘後還有幾筆跑壘紀錄（含代跑者接著跑的）。
+// 刪除或把這個打席改成出局時，這些紀錄不會跟著消失，比分和壘包可能對不上，要提醒使用者
+export function laterRunnerMoves(
+  batter: { id: string; player_id: string; inning: number | null; created_at: string },
+  events: Pick<RunnerEvent, 'atbat_id' | 'inning' | 'runner_player_id' | 'from_base' | 'created_at'>[],
+  runnerSubs: Pick<RunnerSubReplay, 'inning' | 'out_player_id' | 'in_player_id' | 'created_at'>[] = []
+): number {
+  const at = replayTime(batter.created_at);
+  const runners = new Set([batter.player_id]);
+  const subs = runnerSubs
+    .filter((s) => s.inning === batter.inning && replayTime(s.created_at) > at)
+    .sort((a, b) => replayTime(a.created_at) - replayTime(b.created_at));
+  for (const s of subs) {
+    if (s.out_player_id && s.in_player_id && runners.has(s.out_player_id)) runners.add(s.in_player_id);
+  }
+  return events.filter(
+    (e) =>
+      e.atbat_id !== batter.id &&
+      e.inning === batter.inning &&
+      e.from_base > 0 &&
+      e.runner_player_id !== null &&
+      runners.has(e.runner_player_id) &&
+      replayTime(e.created_at) > at
+  ).length;
 }
 
 // 修改打席結果時打者事件怎麼跟著改：

@@ -58,6 +58,8 @@ interface SubstitutionDialogProps {
   saving: boolean;
   error?: string;
   onConfirm: (req: SubstitutionRequest) => void;
+  // 一般替換預設的局數：接下來要上場守備的那一局
+  defenseInning?: number;
 }
 
 const BASE_NAMES = ['', '一壘', '二壘', '三壘'];
@@ -86,20 +88,22 @@ export function SubstitutionDialog({
   saving,
   error,
   onConfirm,
+  defenseInning,
 }: SubstitutionDialogProps) {
   const occupied = ([1, 2, 3] as const).filter((b) => bases[b]);
   const [type, setType] = useState<SubType>(initialType);
   const [base, setBase] = useState<number | null>(occupied.length === 1 ? occupied[0] : null);
   const [replaceSlot, setReplaceSlot] = useState(currentSlot);
   const [inId, setInId] = useState('');
-  const [subInning, setSubInning] = useState(inning);
+  const replaceInning = defenseInning ?? inning;
+  const [subInning, setSubInning] = useState(initialType === 'replace' ? replaceInning : inning);
   const [half, setHalf] = useState<Half>(defaultHalf(initialType, homeAway));
 
   const pickType = (t: SubType) => {
     setType(t);
     setHalf(defaultHalf(t, homeAway));
-    // 代打、代跑一定是現在這一局
-    if (t === 'pinch_hitter' || t === 'pinch_runner') setSubInning(inning);
+    // 代打、代跑一定是現在這一局；一般替換預設下一次上場守備
+    setSubInning(t === 'replace' ? replaceInning : inning);
   };
 
   // 這次換人的棒次與換下的球員
