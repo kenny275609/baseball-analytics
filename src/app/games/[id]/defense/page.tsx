@@ -34,6 +34,7 @@ interface GameInfo {
 
 interface DefenseData {
   ready: boolean;
+  status: GameInfo['status'];
   plays: DefensePlay[];
   positions: { position: number; player_id: string }[];
   innings: { inning: number; opp_runs: number | null }[];
@@ -64,12 +65,17 @@ export default function DefensePage() {
   const clientIdRef = useRef<string | null>(null);
   // 本機最後一次改動的時間：同步請求送出後本機又有改動，就丟掉那次同步結果，避免剛記的紀錄被舊資料蓋掉
   const localChangeRef = useRef(0);
+  // 還沒收到回應的寫入數：寫入途中同步拿到的是寫入前的資料，不能套用
+  const inFlightRef = useRef(0);
+  // 對手得分依序送出，連點 + 時後送的才不會被先送的蓋掉
+  const oppRunsQueueRef = useRef<Promise<void>>(Promise.resolve());
   // 對手每局得分（和比賽頁記分板同一份資料）
   // 目前打序上的球員：被換下的人還排在守備位置上時提醒更新
   const [lineupIds, setLineupIds] = useState<Set<string> | null>(null);
   const [oppRuns, setOppRuns] = useState<Map<number, number>>(new Map());
 
   const applyDefense = useCallback((d: DefenseData) => {
+    setGame((g) => (g && g.status !== d.status ? { ...g, status: d.status } : g));
     setPlays(d.plays);
     setPositions(new Map(d.positions.map((p) => [p.position, p.player_id])));
     setLineupIds(new Set(d.lineup));
@@ -106,27 +112,45 @@ export default function DefensePage() {
   }, [load]);
 
   // 另一支手機也在記：畫面在前景時每 15 秒、切回 App 時同步防守紀錄、守備位置、對手得分與打序（不動正在輸入的局數和結果）
+  // 寫入失敗時也呼叫：改回伺服器上的實際狀態（可能是另一支手機剛改的），而不是本機改之前的舊值
+  const sync = useCallback(async () => {
+    if (document.visibilityState !== 'visible') return;
+    const started = Date.now();
+    try {
+      const res = await fetch(`/api/defense/get?game_id=${gameId}`);
+      if (!res.ok) return;
+      const d: DefenseData = await res.json();
+      if (!d.ready || inFlightRef.current > 0 || localChangeRef.current >= started) return;
+      applyDefense(d);
+    } catch {
+      // 離線時略過，下次再同步
+    }
+  }, [gameId, applyDefense]);
+
+  // 包住每個寫入：送出前、收到回應後都記為本機改動，途中開始的同步結果一律丟掉
+  const write = useCallback(async (url: string, payload: unknown) => {
+    inFlightRef.current++;
+    localChangeRef.current = Date.now();
+    try {
+      return await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } finally {
+      inFlightRef.current--;
+      localChangeRef.current = Date.now();
+    }
+  }, []);
+
   useEffect(() => {
-    const sync = async () => {
-      if (document.visibilityState !== 'visible') return;
-      const started = Date.now();
-      try {
-        const res = await fetch(`/api/defense/get?game_id=${gameId}`);
-        if (!res.ok) return;
-        const d: DefenseData = await res.json();
-        if (!d.ready || localChangeRef.current >= started) return;
-        applyDefense(d);
-      } catch {
-        // 離線時略過，下次再同步
-      }
-    };
     const timer = setInterval(sync, 15000);
     document.addEventListener('visibilitychange', sync);
     return () => {
       clearInterval(timer);
       document.removeEventListener('visibilitychange', sync);
     };
-  }, [gameId, applyDefense]);
+  }, [sync]);
 
   const playerById = useMemo(() => new Map(players.map((p) => [p.id, p])), [players]);
   const byInning = useMemo(() => playsByInning(plays), [plays]);
@@ -166,14 +190,18 @@ export default function DefensePage() {
     setSaving(true);
     setError('');
     try {
-      const res = await fetch('/api/defense/plays/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ game_id: gameId, client_id: (clientIdRef.current ??= crypto.randomUUID()), inning, result, path }),
+      const res = await write('/api/defense/plays/create', {
+        game_id: gameId,
+        client_id: (clientIdRef.current ??= crypto.randomUUID()),
+        inning,
+        result,
+        path,
       });
       const body = await res.json();
-      if (!res.ok) throw new Error(body.error || '記錄失敗');
-      localChangeRef.current = Date.now();
+      if (!res.ok) {
+        if (res.status === 409) sync();
+        throw new Error(body.error || '記錄失敗');
+      }
       setPlays((ps) => (ps.some((p) => p.id === body.play.id) ? ps : [...ps, body.play as DefensePlay]));
       const outsAfter = outsNow + (option?.outs ?? 0);
       let msg = `已記錄：${defenseNotation(result, body.play.path)}（${option?.label}）`;
@@ -201,13 +229,11 @@ export default function DefensePage() {
     if (!window.confirm(`刪除第 ${play.inning} 局的「${defenseNotation(play.result, play.path)}」？`)) return;
     setError('');
     try {
-      const res = await fetch('/api/defense/plays/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: play.id }),
-      });
-      if (!res.ok) throw new Error((await res.json()).error || '刪除失敗');
-      localChangeRef.current = Date.now();
+      const res = await write('/api/defense/plays/delete', { id: play.id });
+      if (!res.ok) {
+        if (res.status === 409 || res.status === 404) sync();
+        throw new Error((await res.json()).error || '刪除失敗');
+      }
       const rest = plays.filter((p) => p.id !== play.id);
       setPlays(rest);
       // 刪掉上一局的第 3 個出局、而這一局還沒記任何東西：回到上一局繼續記
@@ -220,22 +246,40 @@ export default function DefensePage() {
     }
   };
 
-  const saveOppRuns = async (n: number, runs: number) => {
+  const saveOppRuns = (n: number, runs: number) => {
     setError('');
-    const prev = oppRuns;
-    setOppRuns(new Map(oppRuns).set(n, runs));
+    const before = oppRuns.get(n);
+    setOppRuns((m) => new Map(m).set(n, runs));
+    inFlightRef.current++;
     localChangeRef.current = Date.now();
-    try {
-      const res = await fetch('/api/games/innings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ game_id: gameId, inning: n, opp_runs: runs }),
-      });
-      if (!res.ok) throw new Error((await res.json()).error || '儲存得分失敗');
-    } catch (err) {
-      setOppRuns(prev);
-      setError(err instanceof Error ? err.message : '儲存得分失敗');
-    }
+    const send = async () => {
+      let failed = false;
+      try {
+        const res = await write('/api/games/innings', { game_id: gameId, inning: n, opp_runs: runs });
+        if (!res.ok) throw new Error((await res.json()).error || '儲存得分失敗');
+      } catch (err) {
+        setError(err instanceof Error ? err.message : '儲存得分失敗');
+        failed = true;
+        // 離線時同步不到：先退回這次改之前的分數
+        if (err instanceof TypeError) {
+          setOppRuns((m) => {
+            if (m.get(n) !== runs) return m;
+            const next = new Map(m);
+            if (before === undefined) next.delete(n);
+            else next.set(n, before);
+            return next;
+          });
+        }
+      } finally {
+        inFlightRef.current--;
+        // 失敗時等排隊中的都送完再同步，畫面才會回到伺服器上的實際分數
+        if (failed && inFlightRef.current === 0) {
+          localChangeRef.current = 0;
+          sync();
+        }
+      }
+    };
+    oppRunsQueueRef.current = oppRunsQueueRef.current.then(send);
   };
 
   const setPosition = async (position: number, playerId: string | null) => {
@@ -246,17 +290,15 @@ export default function DefensePage() {
     if (playerId) next.set(position, playerId);
     else next.delete(position);
     setPositions(next);
-    localChangeRef.current = Date.now();
     try {
-      const res = await fetch('/api/defense/positions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ game_id: gameId, position, player_id: playerId }),
-      });
+      const res = await write('/api/defense/positions', { game_id: gameId, position, player_id: playerId });
       if (!res.ok) throw new Error((await res.json()).error || '設定失敗');
     } catch (err) {
-      setPositions(prev);
       setError(err instanceof Error ? err.message : '設定失敗');
+      // 改回伺服器上的守備位置（可能是另一支手機剛改的）；離線時同步不到就先退回這次改之前
+      if (inFlightRef.current === 0) localChangeRef.current = 0;
+      if (err instanceof TypeError) setPositions((cur) => (cur === next ? prev : cur));
+      else sync();
     }
   };
 
@@ -342,7 +384,7 @@ export default function DefensePage() {
               </div>
             </div>
 
-            <div className="flex items-center gap-2 text-sm">
+            <div className="flex flex-wrap items-center gap-2 text-sm">
               <span className="whitespace-nowrap text-gray-600">本局對手得分</span>
               <Button
                 type="button"
@@ -468,7 +510,7 @@ export default function DefensePage() {
                     return (
                       <li key={play.id} className="flex items-center gap-3 px-3 py-2">
                         <span className={`w-16 shrink-0 text-xs ${outNumbers.length ? 'text-blue-800' : 'text-red-700'}`}>
-                          {outNumbers.length ? outNumbers.map((o) => `第${o}出局`).join('、') : '上壘'}
+                          {outNumbers.length ? `第${outNumbers.join('、')}出局` : '上壘'}
                         </span>
                         <div className="min-w-0 flex-1">
                           <div>
@@ -534,6 +576,7 @@ export default function DefensePage() {
           <div>6-3：游擊接球傳一壘出局；3U：一壘手自己踩壘；F8：中外野接殺；6-4-3 DP：游擊傳二壘再傳一壘雙殺</div>
           <div>K：三振（捕手刺殺）；K 2-3：不死三振傳一壘出局；E6：游擊失誤；1B(7)：打到左外野的一壘安打</div>
           <div>安打後跑者在壘上被觸殺：先記安打，再記「其他出局」並點傳球路徑，例如 9-5</div>
+          <div>雙殺的兩個刺殺會算給路徑最後兩位。接殺後經中繼傳殺跑者（例如中外野接殺、二壘中繼、本壘觸殺）請分兩筆記：先記「飛球接殺」8，再記「其他出局」8-4-2</div>
         </CardContent>
       </Card>
     </div>

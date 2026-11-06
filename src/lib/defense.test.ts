@@ -80,6 +80,21 @@ describe('fieldingCredits', () => {
     expect(fieldingCredits('error', [6])).toEqual({ putouts: [], assists: [], error: 0 });
     expect(fieldingCredits('single', [7])).toEqual({ putouts: [], assists: [], error: null });
   });
+
+  it('credits each fielder at most one assist per play', () => {
+    // 夾殺 6-5-6-5：游擊、三壘各一次助殺，三壘刺殺
+    expect(fieldingCredits('other_out', [6, 5, 6, 5])).toEqual({ putouts: [3], assists: [0, 1], error: null });
+    // 折返雙殺 3-6-3：一壘助殺 + 刺殺，游擊助殺 + 刺殺
+    expect(fieldingCredits('double_play', [3, 6, 3])).toEqual({ putouts: [1, 2], assists: [0, 1], error: null });
+    expect(fieldingCredits('double_play', [6, 4, 6, 3])).toEqual({ putouts: [2, 3], assists: [0, 1], error: null });
+  });
+
+  it('handles triple plays', () => {
+    expect(defenseNotation('triple_play', [5, 4, 3])).toBe('5-4-3 TP');
+    expect(defenseNotation('triple_play', [6])).toBe('6U TP');
+    expect(fieldingCredits('triple_play', [5, 4, 3])).toEqual({ putouts: [0, 1, 2], assists: [0, 1], error: null });
+    expect(fieldingCredits('triple_play', [6])).toEqual({ putouts: [0, 0, 0], assists: [], error: null });
+  });
 });
 
 describe('fieldingStats', () => {
@@ -97,6 +112,15 @@ describe('fieldingStats', () => {
     expect(get('sub6')).toMatchObject({ e: 1 });
     expect(get('pos:8')).toMatchObject({ playerId: null, po: 1 });
   });
+  it('merges one player across positions and counts a rundown assist once', () => {
+    const stats = fieldingStats([
+      play(1, 'groundout', [6, 3], ['amy', 'bob']),
+      play(2, 'groundout', [4, 3], ['amy', 'bob']),
+      play(3, 'other_out', [6, 5, 6, 5], ['amy', 'cat', 'amy', 'cat']),
+    ]);
+    expect(stats.find((s) => s.key === 'amy')).toMatchObject({ positions: [6, 4], po: 0, a: 3 });
+    expect(stats.find((s) => s.key === 'cat')).toMatchObject({ positions: [5], po: 1, a: 1 });
+  });
 });
 
 describe('playsByInning / currentDefenseInning', () => {
@@ -107,5 +131,6 @@ describe('playsByInning / currentDefenseInning', () => {
     expect(currentDefenseInning(plays)).toBe(2);
     expect(currentDefenseInning(plays.slice(0, 2))).toBe(1);
     expect(currentDefenseInning([])).toBe(1);
+    expect(currentDefenseInning([play(30, 'triple_play', [6])])).toBe(30);
   });
 });

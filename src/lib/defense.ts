@@ -2,7 +2,7 @@
 //
 // 守備路徑用位置編號記錄經手的野手，依傳球順序：6-4-3 = 游擊 → 二壘 → 一壘。
 // 慢壘有 10 位守備，10 是自由手。
-// 刺殺 / 助殺依路徑推算：最後 outs 個位置各記一次刺殺，最後一個以外的位置各記一次助殺
+// 刺殺 / 助殺依路徑推算：最後 outs 個位置各記一次刺殺，最後一個以外的位置各記一次助殺（同一個 play 每人最多一次）
 //   4-3 滾地：4 助殺、3 刺殺；6-4-3 雙殺：6、4 助殺，4、3 刺殺；F8：8 刺殺；K：捕手刺殺
 
 export type DefenseResult =
@@ -195,8 +195,11 @@ export function fieldingCredits(result: DefenseResult, path: number[]): Fielding
   for (let i = Math.max(0, p.length - outs); i < p.length; i++) putouts.push(i);
   // 路徑比出局數短（例如 3U 雙殺）：最後一位記滿刺殺
   while (putouts.length < outs) putouts.push(p.length - 1);
-  // 三振不算捕手助殺
-  const assists = result === 'strikeout' && p.length === 1 ? [] : p.slice(0, -1).map((_, i) => i);
+  // 三振不算捕手助殺；夾殺等同一位野手傳兩次以上的路徑（6-5-6-5）每人只記一次助殺
+  const assists =
+    result === 'strikeout' && p.length === 1
+      ? []
+      : p.slice(0, -1).flatMap((pos, i) => (p.indexOf(pos) === i ? [i] : []));
   return { putouts, assists, error: null };
 }
 
