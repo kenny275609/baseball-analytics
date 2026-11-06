@@ -34,7 +34,7 @@ export interface DefenseResultOption {
 }
 
 export const DEFENSE_RESULTS: DefenseResultOption[] = [
-  { code: 'strikeout', label: '三振', short: 'K', outs: 1, path: 'none', group: 'out' },
+  { code: 'strikeout', label: '三振', short: 'K', outs: 1, path: 'optional', group: 'out' },
   { code: 'groundout', label: '滾地出局', short: 'GO', outs: 1, path: 'required', group: 'out' },
   { code: 'flyout', label: '飛球接殺', short: 'FO', outs: 1, path: 'required', group: 'out' },
   { code: 'double_play', label: '雙殺', short: 'DP', outs: 2, path: 'required', group: 'out' },
@@ -78,7 +78,7 @@ export function positionLabel(pos: number): string {
   return POSITIONS.find((p) => p.pos === pos)?.label ?? `${pos}`;
 }
 
-// 三振沒有點路徑時由捕手接殺
+// 三振沒有點路徑時由捕手接殺；不死三振傳殺記 2-3
 export function effectivePath(result: DefenseResult, path: number[]): number[] {
   if (result === 'strikeout' && path.length === 0) return [2];
   return path;
@@ -89,7 +89,8 @@ export function defenseNotation(result: DefenseResult, path: number[]): string {
   const p = path.join('-');
   switch (result) {
     case 'strikeout':
-      return 'K';
+      // 不死三振傳殺：K 2-3
+      return path.length > 1 ? `K ${p}` : 'K';
     case 'flyout':
       return path.length === 1 ? `F${path[0]}` : p;
     case 'groundout':
@@ -132,13 +133,13 @@ export function pathError(result: DefenseResult, path: number[]): string | null 
   if (!opt) return '請選擇結果';
   if (path.length > MAX_PATH) return `守備路徑最多 ${MAX_PATH} 個位置`;
   if (path.some((p) => !Number.isInteger(p) || p < 1 || p > MAX_POSITION)) return '守備位置錯誤';
-  if (opt.path === 'none' && path.length > 0 && result !== 'strikeout') return `${opt.label}不用記守備路徑`;
+  if (opt.path === 'none' && path.length > 0) return `${opt.label}不用記守備路徑`;
   if (opt.path === 'required' && path.length === 0) {
     return result === 'error' ? '請點選失誤的守備位置' : '請點選守備路徑（接到球、傳球的位置）';
   }
   if ((result === 'flyout' || result === 'sacrifice_fly') && path.length > 1) return '飛球接殺只記接球的位置';
   if (result === 'strikeout' && path.length > 2) return '三振最多記兩個位置（例如漏接後 2-3）';
-  if ((opt.path === 'optional' || result === 'error') && path.length > 1) return '這個結果只記一個位置';
+  if (result !== 'strikeout' && (opt.path === 'optional' || result === 'error') && path.length > 1) return '這個結果只記一個位置';
   return null;
 }
 

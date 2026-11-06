@@ -24,6 +24,7 @@ const play = (inning: number, result: DefensePlay['result'], path: number[], pla
 describe('defenseNotation', () => {
   it('formats common plays', () => {
     expect(defenseNotation('strikeout', [2])).toBe('K');
+    expect(defenseNotation('strikeout', [2, 3])).toBe('K 2-3');
     expect(defenseNotation('flyout', [8])).toBe('F8');
     expect(defenseNotation('groundout', [6, 3])).toBe('6-3');
     expect(defenseNotation('groundout', [3])).toBe('3U');
@@ -46,6 +47,8 @@ describe('pathError', () => {
     expect(pathError('single', [7, 6])).toMatch('一個位置');
     expect(pathError('single', [])).toBeNull();
     expect(pathError('walk', [1])).toMatch('不用');
+    expect(pathError('strikeout', [2, 3])).toBeNull();
+    expect(pathError('strikeout', [2, 3, 4])).toMatch('三振');
   });
   it('rejects bad positions', () => {
     expect(pathError('groundout', [11])).toMatch('位置錯誤');
@@ -72,6 +75,7 @@ describe('fieldingCredits', () => {
     expect(fieldingCredits('double_play', [6, 4, 3])).toEqual({ putouts: [1, 2], assists: [0, 1], error: null });
     expect(fieldingCredits('flyout', [8])).toEqual({ putouts: [0], assists: [], error: null });
     expect(fieldingCredits('strikeout', [2])).toEqual({ putouts: [0], assists: [], error: null });
+    expect(fieldingCredits('strikeout', [2, 3])).toEqual({ putouts: [1], assists: [0], error: null });
     expect(fieldingCredits('double_play', [3])).toEqual({ putouts: [0, 0], assists: [], error: null });
     expect(fieldingCredits('error', [6])).toEqual({ putouts: [], assists: [], error: 0 });
     expect(fieldingCredits('single', [7])).toEqual({ putouts: [], assists: [], error: null });

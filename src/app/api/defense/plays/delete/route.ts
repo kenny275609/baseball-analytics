@@ -12,6 +12,18 @@ export async function POST(request: Request) {
     const body = await request.json().catch(() => null);
     if (!isUuid(body?.id)) return NextResponse.json({ error: '缺少紀錄' }, { status: 400 });
 
+    const { data: play, error: playError } = await supabase
+      .from('defense_plays')
+      .select('games(status)')
+      .eq('id', body.id)
+      .maybeSingle();
+    if (playError) throw playError;
+    if (!play) return NextResponse.json({ error: '找不到這筆紀錄' }, { status: 404 });
+    const game = play.games as unknown as { status: string } | null;
+    if (game?.status !== 'live') {
+      return NextResponse.json({ error: '比賽已結束，不能再刪除紀錄' }, { status: 409 });
+    }
+
     const { error } = await supabase.from('defense_plays').delete().eq('id', body.id);
     if (error) throw error;
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { Button } from '@/components/ui/button';
@@ -32,6 +32,14 @@ interface GameInfo {
   status: 'live' | 'final';
 }
 
+interface DefenseData {
+  ready: boolean;
+  plays: DefensePlay[];
+  positions: { position: number; player_id: string }[];
+  innings: { inning: number; opp_runs: number | null }[];
+  lineup: string[];
+}
+
 const playerText = (p: Player | undefined) => (p ? `${p.number ? `#${p.number} ` : ''}${p.name}` : '');
 
 export default function DefensePage() {
@@ -52,10 +60,21 @@ export default function DefensePage() {
   const [path, setPath] = useState<number[]>([]);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState('');
+  // 同一筆紀錄重試時沿用同一個 client_id：上次其實已經存進去、只是回應沒收到時，伺服器不會重複寫入
+  const clientIdRef = useRef<string | null>(null);
+  // 本機最後一次改動的時間：同步請求送出後本機又有改動，就丟掉那次同步結果，避免剛記的紀錄被舊資料蓋掉
+  const localChangeRef = useRef(0);
   // 對手每局得分（和比賽頁記分板同一份資料）
   // 目前打序上的球員：被換下的人還排在守備位置上時提醒更新
   const [lineupIds, setLineupIds] = useState<Set<string> | null>(null);
   const [oppRuns, setOppRuns] = useState<Map<number, number>>(new Map());
+
+  const applyDefense = useCallback((d: DefenseData) => {
+    setPlays(d.plays);
+    setPositions(new Map(d.positions.map((p) => [p.position, p.player_id])));
+    setLineupIds(new Set(d.lineup));
+    setOppRuns(new Map(d.innings.filter((x) => x.opp_runs !== null).map((x) => [x.inning, x.opp_runs as number])));
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -70,12 +89,9 @@ export default function DefensePage() {
       const ps = playersRes.ok ? (await playersRes.json()).players : [];
       const d = await defRes.json();
       setGame(g.game);
-      setLineupIds(new Set((g.lineup as { player_id: string }[]).map((l) => l.player_id)));
-      setOppRuns(new Map((g.innings as { inning: number; opp_runs: number | null }[]).filter((x) => x.opp_runs !== null).map((x) => [x.inning, x.opp_runs as number])));
       setPlayers(ps);
       setReady(d.ready);
-      setPositions(new Map((d.positions as { position: number; player_id: string }[]).map((p) => [p.position, p.player_id])));
-      setPlays(d.plays);
+      applyDefense(d);
       setInning(currentDefenseInning(d.plays));
       setError('');
     } catch (err) {
@@ -83,11 +99,34 @@ export default function DefensePage() {
     } finally {
       setLoading(false);
     }
-  }, [gameId]);
+  }, [gameId, applyDefense]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  // 另一支手機也在記：畫面在前景時每 15 秒、切回 App 時同步防守紀錄、守備位置、對手得分與打序（不動正在輸入的局數和結果）
+  useEffect(() => {
+    const sync = async () => {
+      if (document.visibilityState !== 'visible') return;
+      const started = Date.now();
+      try {
+        const res = await fetch(`/api/defense/get?game_id=${gameId}`);
+        if (!res.ok) return;
+        const d: DefenseData = await res.json();
+        if (!d.ready || localChangeRef.current >= started) return;
+        applyDefense(d);
+      } catch {
+        // 離線時略過，下次再同步
+      }
+    };
+    const timer = setInterval(sync, 15000);
+    document.addEventListener('visibilitychange', sync);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', sync);
+    };
+  }, [gameId, applyDefense]);
 
   const playerById = useMemo(() => new Map(players.map((p) => [p.id, p])), [players]);
   const byInning = useMemo(() => playsByInning(plays), [plays]);
@@ -103,17 +142,21 @@ export default function DefensePage() {
   const draftError = result ? pathError(result, path) : null;
   const editable = canEdit && ready && game?.status === 'live';
 
+  useEffect(() => {
+    clientIdRef.current = null;
+  }, [result, path, inning]);
+
   const pickResult = (code: DefenseResult) => {
     setResult(code);
-    const opt = getDefenseResult(code);
-    if (opt?.path === 'none') setPath([]);
+    // 改選另一種「依序點多個位置」的結果時保留已點的路徑（例如滾地改野手選擇），其他情況清掉，避免帶著舊路徑記錄
+    if (!(result && multiPath(result) && multiPath(code))) setPath([]);
     setNotice('');
   };
 
   const tapPosition = (pos: number) => {
     if (!option || option.path === 'none') return;
     // 只記一個位置的結果：點別的位置直接換掉
-    const single = option.path === 'optional' || code1(option.code);
+    const single = (option.path === 'optional' && option.code !== 'strikeout') || code1(option.code);
     setPath((p) => (single ? [pos] : [...p, pos]));
   };
 
@@ -126,12 +169,12 @@ export default function DefensePage() {
       const res = await fetch('/api/defense/plays/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ game_id: gameId, client_id: crypto.randomUUID(), inning, result, path }),
+        body: JSON.stringify({ game_id: gameId, client_id: (clientIdRef.current ??= crypto.randomUUID()), inning, result, path }),
       });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || '記錄失敗');
-      const next = [...plays, body.play as DefensePlay];
-      setPlays(next);
+      localChangeRef.current = Date.now();
+      setPlays((ps) => (ps.some((p) => p.id === body.play.id) ? ps : [...ps, body.play as DefensePlay]));
       const outsAfter = outsNow + (option?.outs ?? 0);
       let msg = `已記錄：${defenseNotation(result, body.play.path)}（${option?.label}）`;
       if (outsAfter >= 3 && inning < 30) {
@@ -142,7 +185,13 @@ export default function DefensePage() {
       setResult(null);
       setPath([]);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '記錄失敗');
+      setError(
+        err instanceof TypeError
+          ? '網路連線失敗，不確定這筆有沒有存到。確認網路後再按一次「記錄」，不會重複記錄'
+          : err instanceof Error
+            ? err.message
+            : '記錄失敗',
+      );
     } finally {
       setSaving(false);
     }
@@ -158,7 +207,14 @@ export default function DefensePage() {
         body: JSON.stringify({ id: play.id }),
       });
       if (!res.ok) throw new Error((await res.json()).error || '刪除失敗');
-      setPlays((ps) => ps.filter((p) => p.id !== play.id));
+      localChangeRef.current = Date.now();
+      const rest = plays.filter((p) => p.id !== play.id);
+      setPlays(rest);
+      // 刪掉上一局的第 3 個出局、而這一局還沒記任何東西：回到上一局繼續記
+      if (play.inning === inning - 1 && !rest.some((p) => p.inning === inning)) {
+        setInning(play.inning);
+        setNotice(`已刪除，回到第 ${play.inning} 局`);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : '刪除失敗');
     }
@@ -168,6 +224,7 @@ export default function DefensePage() {
     setError('');
     const prev = oppRuns;
     setOppRuns(new Map(oppRuns).set(n, runs));
+    localChangeRef.current = Date.now();
     try {
       const res = await fetch('/api/games/innings', {
         method: 'POST',
@@ -189,6 +246,7 @@ export default function DefensePage() {
     if (playerId) next.set(position, playerId);
     else next.delete(position);
     setPositions(next);
+    localChangeRef.current = Date.now();
     try {
       const res = await fetch('/api/defense/positions', {
         method: 'POST',
@@ -259,7 +317,7 @@ export default function DefensePage() {
           {editable && benched.length > 0 && (
             <div className="mt-2 rounded-md bg-amber-50 p-2 text-sm text-amber-900">
               {benched.map((p) => `${p.label} ${playerText(playerById.get(positions.get(p.pos)!)) || ''}`).join('、')}
-              {' '}已經換下場（不在目前打序），請改成上場的球員
+              {' '}不在目前打序上（可能已經換下場），請確認守備位置
             </div>
           )}
           <p className="mt-2 text-xs text-gray-500">換守備位置後，之前記錄的刺殺、助殺仍算在當時守那個位置的球員。</p>
@@ -285,7 +343,7 @@ export default function DefensePage() {
             </div>
 
             <div className="flex items-center gap-2 text-sm">
-              <span className="text-gray-600">第 {inning} 局對手得分</span>
+              <span className="whitespace-nowrap text-gray-600">本局對手得分</span>
               <Button
                 type="button"
                 variant="outline"
@@ -299,7 +357,7 @@ export default function DefensePage() {
               <Button type="button" variant="outline" size="icon-sm" onClick={() => saveOppRuns(inning, Math.min(99, (oppRuns.get(inning) ?? 0) + 1))}>
                 +
               </Button>
-              <span className="text-xs text-gray-500">（同步到記分板）</span>
+              <span className="text-xs text-gray-500">會同步到記分板</span>
             </div>
 
             {notice && <div className="text-sm text-green-800 bg-green-50 p-2 rounded-md">{notice}</div>}
@@ -358,6 +416,9 @@ export default function DefensePage() {
                   </div>
                   <Button type="button" variant="outline" onClick={() => setPath((p) => p.slice(0, -1))} disabled={!path.length}>
                     ⌫
+                  </Button>
+                  <Button type="button" variant="outline" onClick={() => setPath([])} disabled={!path.length}>
+                    清除
                   </Button>
                 </div>
               </div>
@@ -471,11 +532,17 @@ export default function DefensePage() {
           <div className="font-semibold text-gray-700">記法說明</div>
           <div>位置編號：1 投、2 捕、3 一壘、4 二壘、5 三壘、6 游擊、7 左外、8 中外、9 右外、10 自由手</div>
           <div>6-3：游擊接球傳一壘出局；3U：一壘手自己踩壘；F8：中外野接殺；6-4-3 DP：游擊傳二壘再傳一壘雙殺</div>
-          <div>K：三振（捕手刺殺）；E6：游擊失誤；1B(7)：打到左外野的一壘安打</div>
+          <div>K：三振（捕手刺殺）；K 2-3：不死三振傳一壘出局；E6：游擊失誤；1B(7)：打到左外野的一壘安打</div>
+          <div>安打後跑者在壘上被觸殺：先記安打，再記「其他出局」並點傳球路徑，例如 9-5</div>
         </CardContent>
       </Card>
     </div>
   );
+}
+
+// 依序點多個位置的結果（滾地、雙殺、野手選擇…）
+function multiPath(code: DefenseResult): boolean {
+  return getDefenseResult(code)?.path === 'required' && !code1(code);
 }
 
 // 只記一個位置、點了直接換掉的結果
@@ -486,6 +553,7 @@ function code1(code: DefenseResult): boolean {
 function pathHint(code: DefenseResult): string {
   if (code === 'flyout' || code === 'sacrifice_fly') return '接球的位置';
   if (code === 'error') return '失誤的位置';
+  if (code === 'strikeout') return '不死三振傳殺才需要點（例如 2 → 3），一般三振不用點';
   if (getDefenseResult(code)?.path === 'optional') return '打到哪個位置';
   return '依序點選經手的位置（接球 → 傳球 → 踩壘）';
 }
