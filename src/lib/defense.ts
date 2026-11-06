@@ -72,6 +72,20 @@ export const POSITIONS = [
 ] as const;
 
 export const MAX_POSITION = 10;
+
+// 依序套用守備位置變更 [位置, 球員]：球員原本守的位置會清空（一人只守一個位置），球員 null 表示清空該位置
+export function applyPositionChanges(
+  positions: Map<number, string>,
+  changes: [number, string | null][],
+): Map<number, string> {
+  const next = new Map(positions);
+  for (const [position, playerId] of changes) {
+    for (const [pos, id] of next) if (id === playerId) next.delete(pos);
+    if (playerId) next.set(position, playerId);
+    else next.delete(position);
+  }
+  return next;
+}
 export const MAX_PATH = 8;
 
 export function positionLabel(pos: number): string {

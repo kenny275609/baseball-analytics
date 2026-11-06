@@ -12,6 +12,7 @@ import {
   DefensePlay,
   DefenseResult,
   POSITIONS,
+  applyPositionChanges,
   currentDefenseInning,
   defenseNotation,
   fieldingStats,
@@ -73,6 +74,8 @@ export default function DefensePage() {
   const oppRunsQueueRef = useRef<Promise<void>>(Promise.resolve());
   // 守備位置也依序送出：連續排人、互換時伺服器套用的順序和畫面一樣
   const positionsQueueRef = useRef<Promise<void>>(Promise.resolve());
+  // 排隊中有任何一筆失敗：等全部送完再同步回伺服器狀態（只看最後一筆會漏掉前面失敗的）
+  const resyncAfterWritesRef = useRef(false);
   // 對手每局得分（和比賽頁記分板同一份資料）
   // 目前打序上的球員：被換下的人還排在守備位置上時提醒更新
   const [lineup, setLineup] = useState<string[] | null>(null);
@@ -164,7 +167,7 @@ export default function DefensePage() {
   const inningList = byInning.get(inning) ?? [];
   const outsNow = inningList.length ? inningList[inningList.length - 1].outsAfter : 0;
 
-  const benched = lineup
+  const benched = lineup?.length
     ? POSITIONS.filter((p) => positions.has(p.pos) && !lineup.includes(positions.get(p.pos)!))
     : [];
   const showField = fieldOpen ?? plays.length === 0;
@@ -197,6 +200,8 @@ export default function DefensePage() {
     setSaving(true);
     setError('');
     try {
+      // 伺服器依當下的守備位置記下經手球員：先等排隊中的守備位置變更（例如互換的兩筆）都送完
+      await positionsQueueRef.current;
       const res = await write('/api/defense/plays/create', {
         game_id: gameId,
         client_id: (clientIdRef.current ??= crypto.randomUUID()),
@@ -260,13 +265,12 @@ export default function DefensePage() {
     inFlightRef.current++;
     localChangeRef.current = Date.now();
     const send = async () => {
-      let failed = false;
       try {
         const res = await write('/api/games/innings', { game_id: gameId, inning: n, opp_runs: runs });
         if (!res.ok) throw new Error((await res.json()).error || '儲存得分失敗');
       } catch (err) {
         setError(err instanceof Error ? err.message : '儲存得分失敗');
-        failed = true;
+        resyncAfterWritesRef.current = true;
         // 離線時同步不到：先退回這次改之前的分數
         if (err instanceof TypeError) {
           setOppRuns((m) => {
@@ -280,7 +284,8 @@ export default function DefensePage() {
       } finally {
         inFlightRef.current--;
         // 失敗時等排隊中的都送完再同步，畫面才會回到伺服器上的實際分數
-        if (failed && inFlightRef.current === 0) {
+        if (resyncAfterWritesRef.current && inFlightRef.current === 0) {
+          resyncAfterWritesRef.current = false;
           localChangeRef.current = 0;
           sync();
         }
@@ -293,31 +298,26 @@ export default function DefensePage() {
   const assignPositions = (changes: [number, string | null][]) => {
     setError('');
     const prev = positions;
-    const next = new Map(positions);
-    for (const [position, playerId] of changes) {
-      for (const [pos, id] of next) if (id === playerId) next.delete(pos);
-      if (playerId) next.set(position, playerId);
-      else next.delete(position);
-    }
+    const next = applyPositionChanges(positions, changes);
     setPositions(next);
     inFlightRef.current++;
     localChangeRef.current = Date.now();
     const send = async () => {
-      let failed = false;
       try {
         for (const [position, playerId] of changes) {
           const res = await write('/api/defense/positions', { game_id: gameId, position, player_id: playerId });
           if (!res.ok) throw new Error((await res.json()).error || '設定失敗');
         }
       } catch (err) {
-        failed = true;
+        resyncAfterWritesRef.current = true;
         setError(err instanceof Error ? err.message : '設定失敗');
         // 離線時同步不到：先退回這次改之前（之後連上線，背景同步會改成伺服器上的實際狀態）
         if (err instanceof TypeError) setPositions((cur) => (cur === next ? prev : cur));
       } finally {
         inFlightRef.current--;
         // 失敗時等排隊中的都送完，再改回伺服器上的守備位置（可能是另一支手機剛改的，或互換只做了一半）
-        if (failed && inFlightRef.current === 0) {
+        if (resyncAfterWritesRef.current && inFlightRef.current === 0) {
+          resyncAfterWritesRef.current = false;
           localChangeRef.current = 0;
           sync();
         }

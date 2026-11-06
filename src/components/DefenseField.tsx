@@ -43,7 +43,10 @@ const label = (p: FieldPlayer | undefined) => (p ? `${p.number ? `#${p.number} `
 // 守備位置圖：先點球員再點位置放上去；點場上的球員再點別的位置就移過去（有人就互換）
 export function DefenseField({ positions, players, lineup, editable, onAssign }: DefenseFieldProps) {
   const [picked, setPick] = useState<Pick>(null);
-  const [showOthers, setShowOthers] = useState(false);
+  const [othersOpen, setShowOthers] = useState(false);
+  // 沒排打序（只記防守）時全部球員直接列出
+  const hasLineup = lineup.length > 0;
+  const showOthers = othersOpen || !hasLineup;
 
   const byId = new Map(players.map((p) => [p.id, p]));
   const onField = new Set(positions.values());
@@ -94,7 +97,8 @@ export function DefenseField({ positions, players, lineup, editable, onAssign }:
       type="button"
       disabled={!editable}
       onClick={() => tapBench(p.id)}
-      className={`h-10 rounded-full border px-3 text-sm ${
+      aria-pressed={pick?.kind === 'player' && pick.id === p.id}
+      className={`h-10 touch-manipulation rounded-full border px-3 text-sm ${
         pick?.kind === 'player' && pick.id === p.id
           ? 'border-blue-700 bg-blue-700 text-white'
           : 'border-gray-300 bg-white text-gray-800'
@@ -120,7 +124,8 @@ export function DefenseField({ positions, players, lineup, editable, onAssign }:
               onClick={() => tapPosition(p.pos)}
               disabled={!editable}
               aria-label={`${p.label}${player ? ` ${label(player)}` : ' 空'}`}
-              className={`absolute flex w-[4.5rem] -translate-x-1/2 -translate-y-1/2 flex-col items-center rounded-lg border px-1 py-0.5 leading-tight shadow-sm ${
+              aria-pressed={selected}
+              className={`absolute touch-manipulation flex w-[4.5rem] -translate-x-1/2 -translate-y-1/2 flex-col items-center rounded-lg border px-1 py-0.5 leading-tight shadow-sm ${
                 selected
                   ? 'border-blue-700 bg-blue-700 text-white'
                   : player
@@ -169,18 +174,33 @@ export function DefenseField({ positions, players, lineup, editable, onAssign }:
 
       {editable && (
         <div className="space-y-2">
-          <div className="text-xs text-gray-500">打序上還沒排守備位置</div>
-          <div className="flex flex-wrap gap-2">
-            {benchLineup.length ? benchLineup.map(benchButton) : <span className="text-sm text-gray-400">都排好了</span>}
-          </div>
-          {others.length > 0 && (
+          {hasLineup && (
             <>
-              <button type="button" onClick={() => setShowOthers((v) => !v)} className="text-xs text-blue-700 underline">
-                {showOthers ? '收起其他球員' : `其他球員（${others.length}）`}
-              </button>
-              {showOthers && <div className="flex flex-wrap gap-2">{others.map(benchButton)}</div>}
+              <div className="text-xs text-gray-500">打序上還沒排守備位置</div>
+              <div className="flex flex-wrap gap-2">
+                {benchLineup.length ? benchLineup.map(benchButton) : <span className="text-sm text-gray-400">都排好了</span>}
+              </div>
             </>
           )}
+          {others.length > 0 &&
+            (hasLineup ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setShowOthers((v) => !v)}
+                  aria-expanded={showOthers}
+                  className="py-1.5 text-sm text-blue-700 underline"
+                >
+                  {showOthers ? '收起其他球員' : `其他球員（${others.length}）`}
+                </button>
+                {showOthers && <div className="flex flex-wrap gap-2">{others.map(benchButton)}</div>}
+              </>
+            ) : (
+              <>
+                <div className="text-xs text-gray-500">還沒排守備位置的球員</div>
+                <div className="flex flex-wrap gap-2">{others.map(benchButton)}</div>
+              </>
+            ))}
         </div>
       )}
     </div>

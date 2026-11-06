@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   DefensePlay,
+  applyPositionChanges,
   currentDefenseInning,
   defenseNotation,
   fieldingCredits,
@@ -138,6 +139,7 @@ describe('fieldingStats', () => {
     expect(formatFieldingPct(amy)).toBe('.667');
     expect(formatFieldingPct(amy.byPosition[1])).toBe('1.000');
     expect(formatFieldingPct({ po: 0, a: 0, e: 0 })).toBe('—');
+    expect(formatFieldingPct({ po: 0, a: 0, e: 1 })).toBe('.000');
   });
 });
 
@@ -150,5 +152,28 @@ describe('playsByInning / currentDefenseInning', () => {
     expect(currentDefenseInning(plays.slice(0, 2))).toBe(1);
     expect(currentDefenseInning([])).toBe(1);
     expect(currentDefenseInning([play(30, 'triple_play', [6])])).toBe(30);
+  });
+});
+
+describe('applyPositionChanges', () => {
+  const base = new Map([
+    [4, 'amy'],
+    [6, 'bob'],
+  ]);
+  const obj = (m: Map<number, string>) => Object.fromEntries(m);
+
+  it('moves a player and clears their old position', () => {
+    expect(obj(applyPositionChanges(base, [[5, 'amy']]))).toEqual({ 5: 'amy', 6: 'bob' });
+  });
+  it('swaps two players with two changes', () => {
+    expect(obj(applyPositionChanges(base, [[6, 'amy'], [4, 'bob']]))).toEqual({ 4: 'bob', 6: 'amy' });
+  });
+  it('replaces and clears', () => {
+    expect(obj(applyPositionChanges(base, [[6, 'cat']]))).toEqual({ 4: 'amy', 6: 'cat' });
+    expect(obj(applyPositionChanges(base, [[4, null]]))).toEqual({ 6: 'bob' });
+  });
+  it('does not mutate the input', () => {
+    applyPositionChanges(base, [[4, null]]);
+    expect(obj(base)).toEqual({ 4: 'amy', 6: 'bob' });
   });
 });
