@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { BaseballField } from '@/components/BaseballField';
-import { POSITIONS } from '@/lib/defense';
+import { POSITIONS, positionLabel } from '@/lib/defense';
 
 export interface FieldPlayer {
   id: string;
@@ -25,7 +25,8 @@ const SPOTS: Record<number, { x: number; y: number }> = {
   10: { x: 50, y: 37 },
 };
 
-type Pick = { kind: 'player'; id: string } | { kind: 'pos'; pos: number } | null;
+// 選取的球員或位置；位置連同當下守那裡的人一起記（空位置為 null），另一支手機改過就作廢
+type Pick = { kind: 'player'; id: string } | { kind: 'pos'; pos: number; id: string | null } | null;
 
 interface DefenseFieldProps {
   positions: Map<number, string>;
@@ -41,7 +42,7 @@ const label = (p: FieldPlayer | undefined) => (p ? `${p.number ? `#${p.number} `
 
 // 守備位置圖：先點球員再點位置放上去；點場上的球員再點別的位置就移過去（有人就互換）
 export function DefenseField({ positions, players, lineup, editable, onAssign }: DefenseFieldProps) {
-  const [pick, setPick] = useState<Pick>(null);
+  const [picked, setPick] = useState<Pick>(null);
   const [showOthers, setShowOthers] = useState(false);
 
   const byId = new Map(players.map((p) => [p.id, p]));
@@ -49,6 +50,13 @@ export function DefenseField({ positions, players, lineup, editable, onAssign }:
   const lineupSet = new Set(lineup);
   const benchLineup = lineup.filter((id) => !onField.has(id) && byId.has(id)).map((id) => byId.get(id)!);
   const others = players.filter((p) => !onField.has(p.id) && !lineupSet.has(p.id));
+  // 背景同步後選取的狀態可能已經不成立（球員被另一支手機排上場、位置上的人換了），就當作沒選
+  const pick: Pick =
+    picked === null
+      ? null
+      : picked.kind === 'player'
+        ? onField.has(picked.id) ? null : picked
+        : (positions.get(picked.pos) ?? null) === picked.id ? picked : null;
 
   const tapPosition = (pos: number) => {
     if (!editable) return;
@@ -56,15 +64,15 @@ export function DefenseField({ positions, players, lineup, editable, onAssign }:
     if (pick?.kind === 'player') {
       onAssign([[pos, pick.id]]);
       setPick(null);
-    } else if (pick?.kind === 'pos') {
-      if (pick.pos !== pos) {
-        const moving = positions.get(pick.pos)!;
-        // 目的地有人：兩人互換
-        onAssign(here ? [[pos, moving], [pick.pos, here]] : [[pos, moving]]);
-      }
+    } else if (pick?.kind === 'pos' && pick.id && pick.pos !== pos) {
+      // 選了場上的人再點別的位置：移過去，目的地有人就互換
+      onAssign(here ? [[pos, pick.id], [pick.pos, here]] : [[pos, pick.id]]);
       setPick(null);
-    } else if (here) {
-      setPick({ kind: 'pos', pos });
+    } else if (pick?.kind === 'pos' && pick.pos === pos) {
+      setPick(null);
+    } else {
+      // 沒選東西，或選的是空位置：改選這個位置
+      setPick({ kind: 'pos', pos, id: here });
     }
   };
 
@@ -78,8 +86,7 @@ export function DefenseField({ positions, players, lineup, editable, onAssign }:
     }
   };
 
-  const pickedName =
-    pick?.kind === 'player' ? label(byId.get(pick.id)) : pick?.kind === 'pos' ? label(byId.get(positions.get(pick.pos)!)) : '';
+  const pickedName = pick?.id ? label(byId.get(pick.id)) : '';
 
   const benchButton = (p: FieldPlayer) => (
     <button
@@ -104,8 +111,8 @@ export function DefenseField({ positions, players, lineup, editable, onAssign }:
         {POSITIONS.map((p) => {
           const { x, y } = SPOTS[p.pos];
           const player = byId.get(positions.get(p.pos) ?? '');
-          const picked = pick?.kind === 'pos' && pick.pos === p.pos;
-          const target = pick !== null && !picked;
+          const selected = pick?.kind === 'pos' && pick.pos === p.pos;
+          const target = pick !== null && !selected;
           return (
             <button
               key={p.pos}
@@ -114,7 +121,7 @@ export function DefenseField({ positions, players, lineup, editable, onAssign }:
               disabled={!editable}
               aria-label={`${p.label}${player ? ` ${label(player)}` : ' 空'}`}
               className={`absolute flex w-[4.5rem] -translate-x-1/2 -translate-y-1/2 flex-col items-center rounded-lg border px-1 py-0.5 leading-tight shadow-sm ${
-                picked
+                selected
                   ? 'border-blue-700 bg-blue-700 text-white'
                   : player
                     ? 'border-white bg-white/95 text-gray-900'
@@ -122,7 +129,7 @@ export function DefenseField({ positions, players, lineup, editable, onAssign }:
               } ${target ? 'ring-2 ring-blue-500' : ''}`}
               style={{ left: `${x}%`, top: `${y}%` }}
             >
-              <span className={`text-[10px] ${picked ? 'text-blue-100' : 'text-gray-500'}`}>
+              <span className={`text-[10px] ${selected ? 'text-blue-100' : 'text-gray-500'}`}>
                 {p.pos} {p.label.replace('手', '')}
               </span>
               <span className="w-full truncate text-xs font-medium">{player ? label(player) : '—'}</span>
@@ -137,10 +144,12 @@ export function DefenseField({ positions, players, lineup, editable, onAssign }:
             ? '點下面的球員，再點球場上的位置放上去；點場上的球員可以換位置'
             : pick.kind === 'player'
               ? `${pickedName}：點球場上的位置（有人就換下來）`
-              : `${pickedName}：點別的位置移過去（有人就互換），或點下面的球員換上場`}
+              : pick.id
+                ? `${pickedName}：點別的位置移過去（有人就互換），或點下面的球員換上場`
+                : `${positionLabel(pick.pos)}：點下面的球員放上來`}
         </div>
       )}
-      {editable && pick?.kind === 'pos' && (
+      {editable && pick?.kind === 'pos' && pick.id && (
         <div className="flex gap-2">
           <button
             type="button"

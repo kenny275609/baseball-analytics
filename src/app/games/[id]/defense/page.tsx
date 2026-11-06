@@ -71,6 +71,8 @@ export default function DefensePage() {
   const inFlightRef = useRef(0);
   // 對手得分依序送出，連點 + 時後送的才不會被先送的蓋掉
   const oppRunsQueueRef = useRef<Promise<void>>(Promise.resolve());
+  // 守備位置也依序送出：連續排人、互換時伺服器套用的順序和畫面一樣
+  const positionsQueueRef = useRef<Promise<void>>(Promise.resolve());
   // 對手每局得分（和比賽頁記分板同一份資料）
   // 目前打序上的球員：被換下的人還排在守備位置上時提醒更新
   const [lineup, setLineup] = useState<string[] | null>(null);
@@ -288,7 +290,7 @@ export default function DefensePage() {
   };
 
   // 依序套用多個守備位置變更（互換位置時是兩筆）：畫面先全部改好，再一筆一筆送出
-  const assignPositions = async (changes: [number, string | null][]) => {
+  const assignPositions = (changes: [number, string | null][]) => {
     setError('');
     const prev = positions;
     const next = new Map(positions);
@@ -298,18 +300,30 @@ export default function DefensePage() {
       else next.delete(position);
     }
     setPositions(next);
-    try {
-      for (const [position, playerId] of changes) {
-        const res = await write('/api/defense/positions', { game_id: gameId, position, player_id: playerId });
-        if (!res.ok) throw new Error((await res.json()).error || '設定失敗');
+    inFlightRef.current++;
+    localChangeRef.current = Date.now();
+    const send = async () => {
+      let failed = false;
+      try {
+        for (const [position, playerId] of changes) {
+          const res = await write('/api/defense/positions', { game_id: gameId, position, player_id: playerId });
+          if (!res.ok) throw new Error((await res.json()).error || '設定失敗');
+        }
+      } catch (err) {
+        failed = true;
+        setError(err instanceof Error ? err.message : '設定失敗');
+        // 離線時同步不到：先退回這次改之前（之後連上線，背景同步會改成伺服器上的實際狀態）
+        if (err instanceof TypeError) setPositions((cur) => (cur === next ? prev : cur));
+      } finally {
+        inFlightRef.current--;
+        // 失敗時等排隊中的都送完，再改回伺服器上的守備位置（可能是另一支手機剛改的，或互換只做了一半）
+        if (failed && inFlightRef.current === 0) {
+          localChangeRef.current = 0;
+          sync();
+        }
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '設定失敗');
-      // 改回伺服器上的守備位置（可能是另一支手機剛改的）；離線時同步不到就先退回這次改之前
-      if (inFlightRef.current === 0) localChangeRef.current = 0;
-      if (err instanceof TypeError) setPositions((cur) => (cur === next ? prev : cur));
-      else sync();
-    }
+    };
+    positionsQueueRef.current = positionsQueueRef.current.then(send);
   };
 
   if (loading) return <div className="text-center py-12">載入中...</div>;
