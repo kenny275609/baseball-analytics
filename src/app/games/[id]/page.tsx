@@ -929,7 +929,12 @@ export default function GamePage() {
         <Link href="/">
           <Button variant="outline" size="sm">← 比賽列表</Button>
         </Link>
-        {game.status === 'live' ? <Badge className="bg-green-600">進行中</Badge> : <Badge variant="outline">已結束</Badge>}
+        <div className="flex items-center gap-2">
+          <Link href={`/games/${gameId}/defense`}>
+            <Button variant="outline" size="sm">防守紀錄</Button>
+          </Link>
+          {game.status === 'live' ? <Badge className="bg-green-600">進行中</Badge> : <Badge variant="outline">已結束</Badge>}
+        </div>
       </div>
 
       <div>
