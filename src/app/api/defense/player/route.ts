@@ -36,8 +36,11 @@ export async function GET(request: Request) {
     const playedIds = new Set(plays.map((p) => p.game_id));
     // 只排了守備位置、沒經手任何紀錄的比賽：那場有記防守才算有上場守備（還沒開始記的比賽不列）
     const onlyPositioned = [...new Set(posRes.data.map((p) => p.game_id))].filter((id) => !playedIds.has(id));
-    if (onlyPositioned.length) {
-      const { data, error } = await supabase.from('defense_plays').select('game_id').in('game_id', onlyPositioned);
+    // 每場只查一筆，不必把整場的紀錄都抓回來
+    const checks = await Promise.all(
+      onlyPositioned.map((id) => supabase.from('defense_plays').select('game_id').eq('game_id', id).limit(1)),
+    );
+    for (const { data, error } of checks) {
       if (error) throw error;
       for (const row of data) playedIds.add(row.game_id);
     }

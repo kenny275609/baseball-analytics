@@ -14,21 +14,21 @@ interface Data {
 
 const Nums = ({ c }: { c: FieldingCount }) => (
   <>
-    <td className="py-1 text-right tabular-nums">{c.po}</td>
-    <td className="py-1 text-right tabular-nums">{c.a}</td>
-    <td className={`py-1 text-right tabular-nums ${c.e ? 'text-red-600' : ''}`}>{c.e}</td>
-    <td className="py-1 text-right tabular-nums">{formatFieldingPct(c)}</td>
+    <td className="whitespace-nowrap py-1 pl-2 text-right tabular-nums">{c.po}</td>
+    <td className="whitespace-nowrap py-1 pl-2 text-right tabular-nums">{c.a}</td>
+    <td className={`whitespace-nowrap py-1 pl-2 text-right tabular-nums ${c.e ? 'text-red-600' : ''}`}>{c.e}</td>
+    <td className="whitespace-nowrap py-1 pl-2 text-right tabular-nums">{formatFieldingPct(c)}</td>
   </>
 );
 
 const Head = ({ first }: { first: string }) => (
   <thead>
     <tr className="text-gray-500">
-      <th className="py-1 text-left font-normal">{first}</th>
-      <th className="py-1 text-right font-normal">刺殺</th>
-      <th className="py-1 text-right font-normal">助殺</th>
-      <th className="py-1 text-right font-normal">失誤</th>
-      <th className="py-1 text-right font-normal">守備率</th>
+      <th className="whitespace-nowrap py-1 text-left font-normal">{first}</th>
+      <th className="whitespace-nowrap py-1 pl-2 text-right font-normal">刺殺</th>
+      <th className="whitespace-nowrap py-1 pl-2 text-right font-normal">助殺</th>
+      <th className="whitespace-nowrap py-1 pl-2 text-right font-normal">失誤</th>
+      <th className="whitespace-nowrap py-1 pl-2 text-right font-normal">守備率</th>
     </tr>
   </thead>
 );
@@ -66,7 +66,7 @@ export function PlayerFielding({ playerId }: { playerId: string }) {
   const gameById = new Map(d.games.map((g) => [g.id, g]));
 
   return (
-    <Card>
+    <Card className="mb-4">
       <CardHeader>
         <CardTitle className="text-lg">守備成績</CardTitle>
         <p className="text-sm text-gray-600">
@@ -85,7 +85,7 @@ export function PlayerFielding({ playerId }: { playerId: string }) {
                 </tr>
               ))}
             <tr className="border-t font-medium">
-              <td className="py-1">{season.byPosition.length > 1 ? '整季合計' : positionLabel(season.positions[0])}</td>
+              <td className="py-1">{season.byPosition.length === 1 ? positionLabel(season.byPosition[0].pos) : '整季合計'}</td>
               <Nums c={season} />
             </tr>
           </tbody>

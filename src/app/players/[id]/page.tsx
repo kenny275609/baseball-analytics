@@ -101,9 +101,7 @@ export default function PlayerPage() {
         </Link>
       </div>
 
-      <div className="mb-4">
-        <PlayerFielding playerId={playerId} />
-      </div>
+      <PlayerFielding playerId={playerId} />
 
       {loading ? (
         <div className="text-center py-12">載入中...</div>

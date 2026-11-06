@@ -203,4 +203,24 @@ describe('playerFielding', () => {
       ['g3', 0, 0, 0, [8]],
     ]);
   });
+
+  it('keeps positions from hits and assigned spots without chances, sorted for the season', () => {
+    const plays = [
+      g('g1', play(1, 'single', [7], ['amy'])),
+      g('g2', play(1, 'groundout', [6, 3], ['amy', 'bob'])),
+      g('g2', play(3, 'double', [8], ['amy'])),
+    ];
+    const { season, games } = playerFielding(plays, 'amy', ['g1', 'g2'], [{ game_id: 'g2', position: 10 }]);
+    expect(games.map((x) => [x.gameId, x.po + x.a + x.e, x.positions])).toEqual([
+      ['g1', 0, [7]],
+      ['g2', 1, [6, 8, 10]],
+    ]);
+    expect(season.positions).toEqual([6, 7, 8, 10]);
+    expect(season.byPosition.map((b) => [b.pos, b.a])).toEqual([
+      [6, 1],
+      [7, 0],
+      [8, 0],
+      [10, 0],
+    ]);
+  });
 });
