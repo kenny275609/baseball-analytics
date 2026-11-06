@@ -52,6 +52,10 @@ export default function DefensePage() {
   const [path, setPath] = useState<number[]>([]);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState('');
+  // 對手每局得分（和比賽頁記分板同一份資料）
+  // 目前打序上的球員：被換下的人還排在守備位置上時提醒更新
+  const [lineupIds, setLineupIds] = useState<Set<string> | null>(null);
+  const [oppRuns, setOppRuns] = useState<Map<number, number>>(new Map());
 
   const load = useCallback(async () => {
     try {
@@ -66,6 +70,8 @@ export default function DefensePage() {
       const ps = playersRes.ok ? (await playersRes.json()).players : [];
       const d = await defRes.json();
       setGame(g.game);
+      setLineupIds(new Set((g.lineup as { player_id: string }[]).map((l) => l.player_id)));
+      setOppRuns(new Map((g.innings as { inning: number; opp_runs: number | null }[]).filter((x) => x.opp_runs !== null).map((x) => [x.inning, x.opp_runs as number])));
       setPlayers(ps);
       setReady(d.ready);
       setPositions(new Map((d.positions as { position: number; player_id: string }[]).map((p) => [p.position, p.player_id])));
@@ -88,6 +94,10 @@ export default function DefensePage() {
   const stats = useMemo(() => fieldingStats(plays), [plays]);
   const inningList = byInning.get(inning) ?? [];
   const outsNow = inningList.length ? inningList[inningList.length - 1].outsAfter : 0;
+
+  const benched = lineupIds
+    ? POSITIONS.filter((p) => positions.has(p.pos) && !lineupIds.has(positions.get(p.pos)!))
+    : [];
 
   const option = getDefenseResult(result);
   const draftError = result ? pathError(result, path) : null;
@@ -154,6 +164,23 @@ export default function DefensePage() {
     }
   };
 
+  const saveOppRuns = async (n: number, runs: number) => {
+    setError('');
+    const prev = oppRuns;
+    setOppRuns(new Map(oppRuns).set(n, runs));
+    try {
+      const res = await fetch('/api/games/innings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ game_id: gameId, inning: n, opp_runs: runs }),
+      });
+      if (!res.ok) throw new Error((await res.json()).error || '儲存得分失敗');
+    } catch (err) {
+      setOppRuns(prev);
+      setError(err instanceof Error ? err.message : '儲存得分失敗');
+    }
+  };
+
   const setPosition = async (position: number, playerId: string | null) => {
     setError('');
     const prev = positions;
@@ -216,7 +243,7 @@ export default function DefensePage() {
                 <select
                   className="h-10 flex-1 min-w-0 rounded-md border border-gray-200 bg-white px-2 text-base"
                   value={positions.get(p.pos) ?? ''}
-                  disabled={!canEdit || !ready}
+                  disabled={!editable}
                   onChange={(e) => setPosition(p.pos, e.target.value || null)}
                 >
                   <option value="">—</option>
@@ -229,6 +256,12 @@ export default function DefensePage() {
               </label>
             ))}
           </div>
+          {editable && benched.length > 0 && (
+            <div className="mt-2 rounded-md bg-amber-50 p-2 text-sm text-amber-900">
+              {benched.map((p) => `${p.label} ${playerText(playerById.get(positions.get(p.pos)!)) || ''}`).join('、')}
+              {' '}已經換下場（不在目前打序），請改成上場的球員
+            </div>
+          )}
           <p className="mt-2 text-xs text-gray-500">換守備位置後，之前記錄的刺殺、助殺仍算在當時守那個位置的球員。</p>
         </CardContent>
       </Card>
@@ -239,9 +272,9 @@ export default function DefensePage() {
           <CardContent className="space-y-4 pt-6">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <Button type="button" variant="outline" size="icon-sm" onClick={() => setInning(Math.max(1, inning - 1))}>◀</Button>
+                <Button type="button" variant="outline" size="icon-sm" onClick={() => setInning((n) => Math.max(1, n - 1))}>◀</Button>
                 <span className="w-14 text-center font-bold">{inning} 局</span>
-                <Button type="button" variant="outline" size="icon-sm" onClick={() => setInning(Math.min(30, inning + 1))}>▶</Button>
+                <Button type="button" variant="outline" size="icon-sm" onClick={() => setInning((n) => Math.min(30, n + 1))}>▶</Button>
               </div>
               <div className="flex items-center gap-1 text-sm text-gray-600">
                 出局
@@ -249,6 +282,24 @@ export default function DefensePage() {
                   <span key={i} className={`inline-block h-3.5 w-3.5 rounded-full border-2 border-red-600 ${i < outsNow ? 'bg-red-600' : ''}`} />
                 ))}
               </div>
+            </div>
+
+            <div className="flex items-center gap-2 text-sm">
+              <span className="text-gray-600">第 {inning} 局對手得分</span>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon-sm"
+                onClick={() => saveOppRuns(inning, Math.max(0, (oppRuns.get(inning) ?? 0) - 1))}
+                disabled={(oppRuns.get(inning) ?? 0) <= 0}
+              >
+                −
+              </Button>
+              <span className="w-6 text-center text-base font-bold tabular-nums">{oppRuns.get(inning) ?? 0}</span>
+              <Button type="button" variant="outline" size="icon-sm" onClick={() => saveOppRuns(inning, Math.min(99, (oppRuns.get(inning) ?? 0) + 1))}>
+                +
+              </Button>
+              <span className="text-xs text-gray-500">（同步到記分板）</span>
             </div>
 
             {notice && <div className="text-sm text-green-800 bg-green-50 p-2 rounded-md">{notice}</div>}
@@ -343,8 +394,9 @@ export default function DefensePage() {
             const list = byInning.get(n)!;
             return (
               <div key={n}>
-                <div className="mb-1 text-sm font-semibold text-gray-700">
-                  第 {n} 局 · {list[list.length - 1].outsAfter} 出局
+                <div className={`mb-1 text-sm font-semibold ${list[list.length - 1].outsAfter > 3 ? 'text-red-600' : 'text-gray-700'}`}>
+                  第 {n} 局 · {list[list.length - 1].outsAfter} 出局{list[list.length - 1].outsAfter > 3 && '（超過 3 出局，請檢查）'}
+                  {oppRuns.has(n) && ` · 失 ${oppRuns.get(n)} 分`}
                 </div>
                 <ul className="divide-y rounded-md border">
                   {list.map(({ play, outNumbers }) => {

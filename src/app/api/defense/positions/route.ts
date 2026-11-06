@@ -23,6 +23,15 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: '球員錯誤' }, { status: 400 });
     }
 
+    const { data: game, error: gameError } = await supabase.from('games').select('status').eq('id', body.game_id).single();
+    if (gameError) {
+      if (gameError.code === 'PGRST116') return NextResponse.json({ error: '找不到這場比賽' }, { status: 404 });
+      throw gameError;
+    }
+    if (game.status !== 'live') {
+      return NextResponse.json({ error: '比賽已結束，不能再改守備位置' }, { status: 409 });
+    }
+
     const { error: clearError } = await supabase
       .from('game_defense')
       .delete()
