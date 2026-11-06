@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { DefenseField } from '@/components/DefenseField';
 import { useSession } from '@/lib/useSession';
 import {
   DEFENSE_RESULTS,
@@ -14,6 +15,7 @@ import {
   currentDefenseInning,
   defenseNotation,
   fieldingStats,
+  formatFieldingPct,
   getDefenseResult,
   pathError,
   playsByInning,
@@ -71,14 +73,16 @@ export default function DefensePage() {
   const oppRunsQueueRef = useRef<Promise<void>>(Promise.resolve());
   // 對手每局得分（和比賽頁記分板同一份資料）
   // 目前打序上的球員：被換下的人還排在守備位置上時提醒更新
-  const [lineupIds, setLineupIds] = useState<Set<string> | null>(null);
+  const [lineup, setLineup] = useState<string[] | null>(null);
+  // 守備位置圖：還沒開始記錄時展開，之後收成一行
+  const [fieldOpen, setFieldOpen] = useState<boolean | null>(null);
   const [oppRuns, setOppRuns] = useState<Map<number, number>>(new Map());
 
   const applyDefense = useCallback((d: DefenseData) => {
     setGame((g) => (g && g.status !== d.status ? { ...g, status: d.status } : g));
     setPlays(d.plays);
     setPositions(new Map(d.positions.map((p) => [p.position, p.player_id])));
-    setLineupIds(new Set(d.lineup));
+    setLineup(d.lineup);
     setOppRuns(new Map(d.innings.filter((x) => x.opp_runs !== null).map((x) => [x.inning, x.opp_runs as number])));
   }, []);
 
@@ -158,9 +162,10 @@ export default function DefensePage() {
   const inningList = byInning.get(inning) ?? [];
   const outsNow = inningList.length ? inningList[inningList.length - 1].outsAfter : 0;
 
-  const benched = lineupIds
-    ? POSITIONS.filter((p) => positions.has(p.pos) && !lineupIds.has(positions.get(p.pos)!))
+  const benched = lineup
+    ? POSITIONS.filter((p) => positions.has(p.pos) && !lineup.includes(positions.get(p.pos)!))
     : [];
+  const showField = fieldOpen ?? plays.length === 0;
 
   const option = getDefenseResult(result);
   const draftError = result ? pathError(result, path) : null;
@@ -282,17 +287,22 @@ export default function DefensePage() {
     oppRunsQueueRef.current = oppRunsQueueRef.current.then(send);
   };
 
-  const setPosition = async (position: number, playerId: string | null) => {
+  // 依序套用多個守備位置變更（互換位置時是兩筆）：畫面先全部改好，再一筆一筆送出
+  const assignPositions = async (changes: [number, string | null][]) => {
     setError('');
     const prev = positions;
     const next = new Map(positions);
-    for (const [pos, id] of next) if (id === playerId) next.delete(pos);
-    if (playerId) next.set(position, playerId);
-    else next.delete(position);
+    for (const [position, playerId] of changes) {
+      for (const [pos, id] of next) if (id === playerId) next.delete(pos);
+      if (playerId) next.set(position, playerId);
+      else next.delete(position);
+    }
     setPositions(next);
     try {
-      const res = await write('/api/defense/positions', { game_id: gameId, position, player_id: playerId });
-      if (!res.ok) throw new Error((await res.json()).error || '設定失敗');
+      for (const [position, playerId] of changes) {
+        const res = await write('/api/defense/positions', { game_id: gameId, position, player_id: playerId });
+        if (!res.ok) throw new Error((await res.json()).error || '設定失敗');
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : '設定失敗');
       // 改回伺服器上的守備位置（可能是另一支手機剛改的）；離線時同步不到就先退回這次改之前
@@ -330,32 +340,30 @@ export default function DefensePage() {
 
       {/* 守備位置 */}
       <Card>
-        <CardHeader>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0">
           <CardTitle className="text-lg">守備位置</CardTitle>
+          <Button variant="outline" size="sm" onClick={() => setFieldOpen(!showField)}>
+            {showField ? '收起' : editable ? '調整' : '查看'}
+          </Button>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {POSITIONS.map((p) => (
-              <label key={p.pos} className="flex items-center gap-2 text-sm">
-                <span className="w-20 shrink-0 text-gray-600">
-                  {p.pos} {p.label}
-                </span>
-                <select
-                  className="h-10 flex-1 min-w-0 rounded-md border border-gray-200 bg-white px-2 text-base"
-                  value={positions.get(p.pos) ?? ''}
-                  disabled={!editable}
-                  onChange={(e) => setPosition(p.pos, e.target.value || null)}
-                >
-                  <option value="">—</option>
-                  {players.map((pl) => (
-                    <option key={pl.id} value={pl.id}>
-                      {playerText(pl)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            ))}
-          </div>
+          {showField ? (
+            <DefenseField
+              positions={positions}
+              players={players}
+              lineup={lineup ?? []}
+              editable={editable}
+              onAssign={assignPositions}
+            />
+          ) : (
+            <div className="text-sm text-gray-700">
+              {positions.size
+                ? POSITIONS.filter((p) => positions.has(p.pos))
+                    .map((p) => `${p.short} ${playerById.get(positions.get(p.pos)!)?.name ?? '（已刪除）'}`)
+                    .join('、')
+                : '還沒排守備位置'}
+            </div>
+          )}
           {editable && benched.length > 0 && (
             <div className="mt-2 rounded-md bg-amber-50 p-2 text-sm text-amber-900">
               {benched.map((p) => `${p.label} ${playerText(playerById.get(positions.get(p.pos)!)) || ''}`).join('、')}
@@ -546,25 +554,38 @@ export default function DefensePage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-gray-500">
-                  <th className="py-1 text-left font-normal">球員</th>
-                  <th className="py-1 text-left font-normal">位置</th>
+                  <th className="py-1 text-left font-normal">球員 / 位置</th>
                   <th className="py-1 text-right font-normal">刺殺</th>
                   <th className="py-1 text-right font-normal">助殺</th>
                   <th className="py-1 text-right font-normal">失誤</th>
+                  <th className="py-1 text-right font-normal">守備率</th>
                 </tr>
               </thead>
               <tbody>
-                {stats.map((s) => (
-                  <tr key={s.key} className="border-t">
-                    <td className="py-1.5">{s.playerId ? playerText(playerById.get(s.playerId)) || '（已刪除）' : '（未排人）'}</td>
-                    <td className="py-1.5 text-gray-600">{s.positions.map(positionLabel).join('、')}</td>
-                    <td className="py-1.5 text-right tabular-nums">{s.po}</td>
-                    <td className="py-1.5 text-right tabular-nums">{s.a}</td>
-                    <td className={`py-1.5 text-right tabular-nums ${s.e ? 'text-red-600' : ''}`}>{s.e}</td>
-                  </tr>
-                ))}
+                {stats.map((s) => {
+                  const name = s.playerId ? playerText(playerById.get(s.playerId)) || '（已刪除）' : '（未排人）';
+                  const rows = s.byPosition.length > 1
+                    ? [
+                        { key: s.key, label: name, sub: '合計', c: s, strong: true },
+                        ...s.byPosition.map((b) => ({ key: `${s.key}:${b.pos}`, label: '', sub: positionLabel(b.pos), c: b, strong: false })),
+                      ]
+                    : [{ key: s.key, label: name, sub: positionLabel(s.positions[0]), c: s, strong: true }];
+                  return rows.map((r, i) => (
+                    <tr key={r.key} className={i === 0 ? 'border-t' : ''}>
+                      <td className={`py-1 ${r.label ? '' : 'pl-4'}`}>
+                        {r.label && <span className="font-medium">{r.label} </span>}
+                        <span className="text-gray-500">{r.sub}</span>
+                      </td>
+                      <td className="py-1 text-right tabular-nums">{r.c.po}</td>
+                      <td className="py-1 text-right tabular-nums">{r.c.a}</td>
+                      <td className={`py-1 text-right tabular-nums ${r.c.e ? 'text-red-600' : ''}`}>{r.c.e}</td>
+                      <td className={`py-1 text-right tabular-nums ${r.strong ? '' : 'text-gray-500'}`}>{formatFieldingPct(r.c)}</td>
+                    </tr>
+                  ));
+                })}
               </tbody>
             </table>
+            <p className="mt-2 text-xs text-gray-500">守備率 =（刺殺 + 助殺）÷（刺殺 + 助殺 + 失誤）。同一位球員守過多個位置時分開列出。</p>
           </CardContent>
         </Card>
       )}

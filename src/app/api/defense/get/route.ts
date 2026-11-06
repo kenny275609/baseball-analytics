@@ -24,7 +24,7 @@ export async function GET(request: Request) {
         .order('created_at')
         .order('id'),
       supabase.from('game_innings').select('inning, opp_runs').eq('game_id', gameId).order('inning'),
-      supabase.from('game_lineups').select('player_id').eq('game_id', gameId),
+      supabase.from('game_lineups').select('player_id').eq('game_id', gameId).order('batting_order'),
     ]);
     if (gameRes.error) throw gameRes.error;
     if (!gameRes.data) return NextResponse.json({ error: '找不到這場比賽' }, { status: 404 });

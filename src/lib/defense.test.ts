@@ -5,6 +5,7 @@ import {
   defenseNotation,
   fieldingCredits,
   fieldingStats,
+  formatFieldingPct,
   parseDefenseInput,
   pathError,
   playsByInning,
@@ -120,6 +121,23 @@ describe('fieldingStats', () => {
     ]);
     expect(stats.find((s) => s.key === 'amy')).toMatchObject({ positions: [6, 4], po: 0, a: 3 });
     expect(stats.find((s) => s.key === 'cat')).toMatchObject({ positions: [5], po: 1, a: 1 });
+  });
+
+  it('splits each player by position with fielding percentage', () => {
+    const stats = fieldingStats([
+      play(1, 'groundout', [6, 3], ['amy', 'bob']),
+      play(1, 'error', [6], ['amy']),
+      play(2, 'flyout', [4], ['amy']),
+    ]);
+    const amy = stats.find((s) => s.key === 'amy')!;
+    expect(amy).toMatchObject({ po: 1, a: 1, e: 1 });
+    expect(amy.byPosition).toEqual([
+      { pos: 6, po: 0, a: 1, e: 1 },
+      { pos: 4, po: 1, a: 0, e: 0 },
+    ]);
+    expect(formatFieldingPct(amy)).toBe('.667');
+    expect(formatFieldingPct(amy.byPosition[1])).toBe('1.000');
+    expect(formatFieldingPct({ po: 0, a: 0, e: 0 })).toBe('—');
   });
 });
 

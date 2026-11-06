@@ -203,35 +203,59 @@ export function fieldingCredits(result: DefenseResult, path: number[]): Fielding
   return { putouts, assists, error: null };
 }
 
-export interface FieldingLine {
-  key: string; // 球員 id，沒排人時用 pos:N
-  playerId: string | null;
-  positions: number[];
+export interface FieldingCount {
   po: number;
   a: number;
   e: number;
 }
 
+export interface FieldingLine extends FieldingCount {
+  key: string; // 球員 id，沒排人時用 pos:N
+  playerId: string | null;
+  positions: number[];
+  // 同一位球員在每個守備位置各自的成績（依 positions 順序）
+  byPosition: ({ pos: number } & FieldingCount)[];
+}
+
+// 守備率 = (刺殺 + 助殺) / (刺殺 + 助殺 + 失誤)；沒有守備機會時為 null
+export function fieldingPct({ po, a, e }: FieldingCount): number | null {
+  const chances = po + a + e;
+  return chances === 0 ? null : (po + a) / chances;
+}
+
+// 記分簿寫法：1.000、.955、—
+export function formatFieldingPct(c: FieldingCount): string {
+  const pct = fieldingPct(c);
+  if (pct === null) return '—';
+  return pct >= 1 ? '1.000' : pct.toFixed(3).replace(/^0/, '');
+}
+
 export function fieldingStats(plays: DefensePlay[]): FieldingLine[] {
   const lines = new Map<string, FieldingLine>();
-  const line = (idx: number, play: DefensePlay, path: number[]) => {
+  // 回傳球員總計與該位置的小計，兩者一起加
+  const line = (idx: number, play: DefensePlay, path: number[]): FieldingCount[] => {
     const playerId = play.path_players[idx] ?? null;
     const pos = path[idx];
     const key = playerId ?? `pos:${pos}`;
     let l = lines.get(key);
     if (!l) {
-      l = { key, playerId, positions: [], po: 0, a: 0, e: 0 };
+      l = { key, playerId, positions: [], byPosition: [], po: 0, a: 0, e: 0 };
       lines.set(key, l);
     }
-    if (!l.positions.includes(pos)) l.positions.push(pos);
-    return l;
+    let atPos = l.byPosition.find((b) => b.pos === pos);
+    if (!atPos) {
+      atPos = { pos, po: 0, a: 0, e: 0 };
+      l.positions.push(pos);
+      l.byPosition.push(atPos);
+    }
+    return [l, atPos];
   };
   for (const play of plays) {
     const path = effectivePath(play.result, play.path);
     const credit = fieldingCredits(play.result, play.path);
-    for (const i of credit.putouts) line(i, play, path).po++;
-    for (const i of credit.assists) line(i, play, path).a++;
-    if (credit.error !== null) line(credit.error, play, path).e++;
+    for (const i of credit.putouts) for (const c of line(i, play, path)) c.po++;
+    for (const i of credit.assists) for (const c of line(i, play, path)) c.a++;
+    if (credit.error !== null) for (const c of line(credit.error, play, path)) c.e++;
   }
   return [...lines.values()].sort((x, y) => Math.min(...x.positions) - Math.min(...y.positions));
 }
