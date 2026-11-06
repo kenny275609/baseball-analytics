@@ -14,6 +14,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { BaseballField, FieldPoint } from '@/components/BaseballField';
+import { PlayerFielding } from '@/components/PlayerFielding';
 import { useSession } from '@/lib/useSession';
 import {
   AtbatResultFields,
@@ -98,6 +99,10 @@ export default function PlayerPage() {
         <Link href={`/stats/${playerId}`}>
           <Button variant="outline">完整統計</Button>
         </Link>
+      </div>
+
+      <div className="mb-4">
+        <PlayerFielding playerId={playerId} />
       </div>
 
       {loading ? (

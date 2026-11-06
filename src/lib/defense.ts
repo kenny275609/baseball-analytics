@@ -303,3 +303,37 @@ export function currentDefenseInning(plays: DefensePlay[]): number {
   const list = by.get(last)!;
   return list[list.length - 1].outsAfter >= 3 ? Math.min(30, last + 1) : last;
 }
+
+// 球員頁：一位球員整季與每一場的守備成績（plays 只需要含這位球員的紀錄）
+export interface PlayerGameFielding extends FieldingCount {
+  gameId: string;
+  // 有守備機會的位置在前，再補上只排了位置、沒有守備機會的位置
+  positions: number[];
+  byPosition: ({ pos: number } & FieldingCount)[];
+}
+
+export function playerFielding(
+  plays: (DefensePlay & { game_id: string })[],
+  playerId: string,
+  gameIds: string[],
+  // 每場排過的守備位置（game_defense 目前的位置），沒守備機會的比賽也看得出守哪裡
+  assigned: { game_id: string; position: number }[] = [],
+): { season: FieldingLine; games: PlayerGameFielding[] } {
+  const empty = (): FieldingLine => ({ key: playerId, playerId, positions: [], byPosition: [], po: 0, a: 0, e: 0 });
+  const mine = (ps: DefensePlay[]) => fieldingStats(ps).find((l) => l.key === playerId) ?? empty();
+
+  const season = mine(plays);
+  const games = gameIds.map((gameId) => {
+    const line = mine(plays.filter((p) => p.game_id === gameId));
+    const positions = [...line.positions];
+    for (const a of assigned) if (a.game_id === gameId && !positions.includes(a.position)) positions.push(a.position);
+    return { gameId, po: line.po, a: line.a, e: line.e, positions, byPosition: line.byPosition };
+  });
+  // 整季的守備位置也補上只排過、沒機會的位置
+  for (const g of games) for (const pos of g.positions) if (!season.positions.includes(pos)) season.positions.push(pos);
+  for (const pos of season.positions) {
+    if (!season.byPosition.some((b) => b.pos === pos)) season.byPosition.push({ pos, po: 0, a: 0, e: 0 });
+  }
+  season.byPosition.sort((x, y) => x.pos - y.pos);
+  return { season, games };
+}

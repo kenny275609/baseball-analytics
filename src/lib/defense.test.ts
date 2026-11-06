@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DefensePlay,
   applyPositionChanges,
+  playerFielding,
   currentDefenseInning,
   defenseNotation,
   fieldingCredits,
@@ -175,5 +176,31 @@ describe('applyPositionChanges', () => {
   it('does not mutate the input', () => {
     applyPositionChanges(base, [[4, null]]);
     expect(obj(base)).toEqual({ 4: 'amy', 6: 'bob' });
+  });
+});
+
+describe('playerFielding', () => {
+  const g = (game_id: string, p: DefensePlay) => ({ ...p, game_id });
+  it('totals the season by position and lists every game, including ones without chances', () => {
+    const plays = [
+      g('g1', play(1, 'groundout', [6, 3], ['amy', 'bob'])),
+      g('g1', play(2, 'error', [6], ['amy'])),
+      g('g2', play(1, 'flyout', [4], ['amy'])),
+    ];
+    const { season, games } = playerFielding(plays, 'amy', ['g2', 'g1', 'g3'], [
+      { game_id: 'g3', position: 8 },
+      { game_id: 'g2', position: 4 },
+    ]);
+    expect(season).toMatchObject({ po: 1, a: 1, e: 1 });
+    expect(season.byPosition).toEqual([
+      { pos: 4, po: 1, a: 0, e: 0 },
+      { pos: 6, po: 0, a: 1, e: 1 },
+      { pos: 8, po: 0, a: 0, e: 0 },
+    ]);
+    expect(games.map((x) => [x.gameId, x.po, x.a, x.e, x.positions])).toEqual([
+      ['g2', 1, 0, 0, [4]],
+      ['g1', 0, 1, 1, [6]],
+      ['g3', 0, 0, 0, [8]],
+    ]);
   });
 });
