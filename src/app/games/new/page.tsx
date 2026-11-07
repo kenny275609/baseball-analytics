@@ -50,22 +50,28 @@ export default function NewGamePage() {
 
   const copyLastLineup = async () => {
     if (!lastGameId) return;
-    const [res, defRes] = await Promise.all([
-      fetch(`/api/games/get?id=${lastGameId}`),
-      fetch(`/api/defense/get?game_id=${lastGameId}`),
-    ]);
-    const data = await res.json();
-    setLineup((data.lineup || []).map((l: { player_id: string }) => l.player_id));
-    // 守備位置也沿用上一場最後的配置（已刪除的球員略過）
-    const def = defRes.ok ? await defRes.json() : null;
-    const ids = new Set(players.map((p) => p.id));
-    setPositions(
-      new Map(
-        ((def?.positions || []) as { position: number; player_id: string }[])
-          .filter((p) => ids.has(p.player_id))
-          .map((p) => [p.position, p.player_id]),
-      ),
-    );
+    setError('');
+    try {
+      const [res, defRes] = await Promise.all([
+        fetch(`/api/games/get?id=${lastGameId}`),
+        fetch(`/api/defense/get?game_id=${lastGameId}`),
+      ]);
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      const def = defRes.ok ? await defRes.json() : null;
+      // 打序與守備位置都沿用上一場最後的配置（已刪除的球員略過）
+      const ids = new Set(players.map((p) => p.id));
+      setLineup(((data.lineup || []) as { player_id: string }[]).map((l) => l.player_id).filter((id) => ids.has(id)));
+      setPositions(
+        new Map(
+          ((def?.positions || []) as { position: number; player_id: string }[])
+            .filter((p) => ids.has(p.player_id))
+            .map((p) => [p.position, p.player_id]),
+        ),
+      );
+    } catch {
+      setError('載入上一場資料失敗');
+    }
   };
 
   const move = (index: number, delta: number) => {
@@ -139,7 +145,7 @@ export default function NewGamePage() {
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
             <CardTitle>打序</CardTitle>
-            {lastGameId && (
+            {lastGameId && players.length > 0 && (
               <Button type="button" variant="outline" size="sm" onClick={copyLastLineup}>
                 沿用上一場
               </Button>
@@ -196,6 +202,9 @@ export default function NewGamePage() {
                 editable
                 onAssign={(changes) => setPositions((prev) => applyPositionChanges(prev, changes))}
               />
+              {lineup.length > 0 && [...positions.values()].some((id) => !lineup.includes(id)) && (
+                <p className="rounded-md bg-amber-50 p-2 text-sm text-amber-800">有守備球員不在打序上，請確認是否要加入打序</p>
+              )}
             </CardContent>
           </Card>
         )}

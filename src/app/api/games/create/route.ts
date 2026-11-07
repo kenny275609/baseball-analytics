@@ -5,18 +5,23 @@ import { isMissingTable } from '@/lib/score';
 import { isUuid } from '@/lib/baserunning';
 import { MAX_POSITION } from '@/lib/defense';
 
+// 打序或守備位置裡有剛被刪除的球員（外鍵錯誤）
+const deletedPlayer = () => NextResponse.json({ error: '有球員已被刪除，請重新整理後再試' }, { status: 400 });
+
 export async function POST(request: Request) {
   try {
     const auth = await authorize(['editor', 'admin']);
     if (auth.error) return auth.error;
     const supabase = await createClient();
 
-    const { game_date, opponent, home_away, lineup, positions = [] } = await request.json();
+    const body = await request.json().catch(() => null);
+    if (!body) return NextResponse.json({ error: '資料格式錯誤' }, { status: 400 });
+    const { game_date, opponent, home_away, lineup, positions = [] } = body;
 
     if (!opponent || typeof opponent !== 'string' || !opponent.trim()) {
       return NextResponse.json({ error: '請輸入對手' }, { status: 400 });
     }
-    if (!Array.isArray(lineup) || lineup.length === 0 || lineup.length > 20) {
+    if (!Array.isArray(lineup) || lineup.length === 0 || lineup.length > 20 || !lineup.every(isUuid)) {
       return NextResponse.json({ error: '請排定打序（1–20 人）' }, { status: 400 });
     }
     // 一位球員只能排一個棒次（資料庫 game_lineups(game_id, player_id) 也有唯一索引）
@@ -65,6 +70,7 @@ export async function POST(request: Request) {
     if (lineupError) {
       // 打序寫入失敗就把比賽也刪掉，避免留下沒有打序的比賽
       await supabase.from('games').delete().eq('id', game.id);
+      if (lineupError.code === '23503') return deletedPlayer();
       throw lineupError;
     }
 
@@ -79,6 +85,7 @@ export async function POST(request: Request) {
       // 防守的 migration 還沒執行時只略過守備位置，比賽照常建立
       if (defenseError && !isMissingTable(defenseError)) {
         await supabase.from('games').delete().eq('id', game.id);
+        if (defenseError.code === '23503') return deletedPlayer();
         throw defenseError;
       }
     }
@@ -86,6 +93,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ game }, { status: 201 });
   } catch (error) {
     console.error('Error creating game:', error);
-    return NextResponse.json({ error: 'Failed to create game' }, { status: 500 });
+    return NextResponse.json({ error: '建立比賽失敗' }, { status: 500 });
   }
 }
