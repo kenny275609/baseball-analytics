@@ -7,6 +7,8 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { DefenseField } from '@/components/DefenseField';
+import { applyPositionChanges } from '@/lib/defense';
 
 interface Player {
   id: string;
@@ -26,6 +28,8 @@ export default function NewGamePage() {
   const [opponent, setOpponent] = useState('');
   const [homeAway, setHomeAway] = useState<'home' | 'away'>('home');
   const [lineup, setLineup] = useState<string[]>([]);
+  // 守備位置 → 球員；可以不排，開賽後到防守頁再排
+  const [positions, setPositions] = useState<Map<number, string>>(new Map());
   const [lastGameId, setLastGameId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
@@ -46,9 +50,22 @@ export default function NewGamePage() {
 
   const copyLastLineup = async () => {
     if (!lastGameId) return;
-    const res = await fetch(`/api/games/get?id=${lastGameId}`);
+    const [res, defRes] = await Promise.all([
+      fetch(`/api/games/get?id=${lastGameId}`),
+      fetch(`/api/defense/get?game_id=${lastGameId}`),
+    ]);
     const data = await res.json();
     setLineup((data.lineup || []).map((l: { player_id: string }) => l.player_id));
+    // 守備位置也沿用上一場最後的配置（已刪除的球員略過）
+    const def = defRes.ok ? await defRes.json() : null;
+    const ids = new Set(players.map((p) => p.id));
+    setPositions(
+      new Map(
+        ((def?.positions || []) as { position: number; player_id: string }[])
+          .filter((p) => ids.has(p.player_id))
+          .map((p) => [p.position, p.player_id]),
+      ),
+    );
   };
 
   const move = (index: number, delta: number) => {
@@ -70,7 +87,13 @@ export default function NewGamePage() {
       const res = await fetch('/api/games/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ game_date: gameDate, opponent, home_away: homeAway, lineup }),
+        body: JSON.stringify({
+          game_date: gameDate,
+          opponent,
+          home_away: homeAway,
+          lineup,
+          positions: [...positions].map(([position, player_id]) => ({ position, player_id })),
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
@@ -157,6 +180,25 @@ export default function NewGamePage() {
             )}
           </CardContent>
         </Card>
+
+        {players.length > 0 && (
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between">
+              <CardTitle>守備位置</CardTitle>
+              <span className="text-sm text-gray-500">已排 {positions.size} 個位置</span>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              <p className="text-sm text-gray-500">可以先不排，開賽後到「防守」頁再排</p>
+              <DefenseField
+                positions={positions}
+                players={players}
+                lineup={lineup}
+                editable
+                onAssign={(changes) => setPositions((prev) => applyPositionChanges(prev, changes))}
+              />
+            </CardContent>
+          </Card>
+        )}
 
         {error && <div className="text-sm text-red-600 bg-red-50 p-3 rounded-md">{error}</div>}
         <Button type="submit" className="w-full" size="lg" disabled={submitting}>

@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { authorize } from '@/lib/auth';
+import { isMissingTable } from '@/lib/score';
+import { isUuid } from '@/lib/baserunning';
+import { MAX_POSITION } from '@/lib/defense';
 
 export async function POST(request: Request) {
   try {
@@ -8,7 +11,7 @@ export async function POST(request: Request) {
     if (auth.error) return auth.error;
     const supabase = await createClient();
 
-    const { game_date, opponent, home_away, lineup } = await request.json();
+    const { game_date, opponent, home_away, lineup, positions = [] } = await request.json();
 
     if (!opponent || typeof opponent !== 'string' || !opponent.trim()) {
       return NextResponse.json({ error: '請輸入對手' }, { status: 400 });
@@ -19,6 +22,22 @@ export async function POST(request: Request) {
     // 一位球員只能排一個棒次（資料庫 game_lineups(game_id, player_id) 也有唯一索引）
     if (new Set(lineup).size !== lineup.length) {
       return NextResponse.json({ error: '同一位球員不能排在兩個棒次' }, { status: 400 });
+    }
+
+    // 開賽前排好的守備位置（可以不排，之後到防守頁再排）：[{ position, player_id }]
+    if (
+      !Array.isArray(positions) ||
+      positions.some(
+        (p) => !Number.isInteger(p?.position) || p.position < 1 || p.position > MAX_POSITION || !isUuid(p?.player_id),
+      )
+    ) {
+      return NextResponse.json({ error: '守備位置錯誤' }, { status: 400 });
+    }
+    if (
+      new Set(positions.map((p) => p.position)).size !== positions.length ||
+      new Set(positions.map((p) => p.player_id)).size !== positions.length
+    ) {
+      return NextResponse.json({ error: '同一個位置只能排一人，一人也只能守一個位置' }, { status: 400 });
     }
 
     const { data: game, error } = await supabase
@@ -47,6 +66,21 @@ export async function POST(request: Request) {
       // 打序寫入失敗就把比賽也刪掉，避免留下沒有打序的比賽
       await supabase.from('games').delete().eq('id', game.id);
       throw lineupError;
+    }
+
+    if (positions.length > 0) {
+      const { error: defenseError } = await supabase.from('game_defense').insert(
+        positions.map((p: { position: number; player_id: string }) => ({
+          game_id: game.id,
+          position: p.position,
+          player_id: p.player_id,
+        })),
+      );
+      // 防守的 migration 還沒執行時只略過守備位置，比賽照常建立
+      if (defenseError && !isMissingTable(defenseError)) {
+        await supabase.from('games').delete().eq('id', game.id);
+        throw defenseError;
+      }
     }
 
     return NextResponse.json({ game }, { status: 201 });
